@@ -126,6 +126,24 @@ inline bool disableWaitTimedOut(uint64_t wait_cycles, uint64_t timeout_cycles) {
     return wait_cycles > timeout_cycles;
 }
 
+/// 撤使能门控是否应该"扣住"目标不放（继续维持 EnableOperation），
+/// 而不是让 DisableVoltage 直通。
+///
+/// 终审 finding I2：只看转速/stopping 不够——驱动器已经处于 Switch On
+/// Disabled（或任何非 OperationEnabled 状态）时，外力反驱关节超过安全转速
+/// （手扳摆臂、抱闸滑动）不该触发这条门控去抢发 EnableOperation。制动器只在
+/// **带着力矩**（OperationEnabled）时才可能被动态制动伤到，此时才值得等；
+/// 否则就是没有操作员动作的"自励磁"——驱动器自己重新上电闭环。
+///
+/// current_state 是"上一拍"解码出的状态（调用方在本拍 cia_.update() 之前
+/// 读取 cia_.state()），在 1kHz 下滞后不到 1ms，足够用。
+inline bool shouldHoldEnableForDisableGate(Cia402State current_state,
+                                            double output_rpm,
+                                            bool stopping) {
+    return current_state == Cia402State::OperationEnabled &&
+           !isSafeToDisableAt(output_rpm, stopping);
+}
+
 struct ControllerCfg {
     std::string default_id = "passthrough";
     double torque_Nm_limit = 20.0;

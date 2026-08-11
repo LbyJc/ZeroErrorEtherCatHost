@@ -87,3 +87,33 @@ TEST(disable_wait_not_timed_out_within_limit) {
 TEST(disable_wait_times_out_beyond_limit) {
     CHECK(disableWaitTimedOut(15001, 15000));
 }
+
+// ── shouldHoldEnableForDisableGate：终审 finding I2 ─────────────────────
+// 只有驱动器当前确已带着力矩（OperationEnabled）且还不安全时，门控才应该
+// 扣住目标、维持 EnableOperation；否则会造成没有操作员动作的"自励磁"——
+// 驱动器已经掉到 Switch On Disabled 等更低状态，外力反驱超过安全转速时，
+// 门控绝不能把它拉回 EnableOperation。
+
+TEST(disable_gate_holds_when_operation_enabled_and_unsafe) {
+    CHECK(shouldHoldEnableForDisableGate(Cia402State::OperationEnabled,
+                                          /*output_rpm=*/10.0, /*stopping=*/true));
+}
+
+TEST(disable_gate_passes_through_once_safe_even_if_operation_enabled) {
+    CHECK(!shouldHoldEnableForDisableGate(Cia402State::OperationEnabled,
+                                           /*output_rpm=*/0.5, /*stopping=*/false));
+}
+
+// 这是 I2 的核心场景：驱动器已经不在 OperationEnabled（比如已经是
+// Switch On Disabled），即使外力把它反驱到很高的转速，也绝不能因为这条
+// 门控又把它拉回 EnableOperation——那是没有操作员动作的"自励磁"。
+TEST(disable_gate_never_holds_when_not_operation_enabled_regardless_of_speed) {
+    CHECK(!shouldHoldEnableForDisableGate(Cia402State::SwitchOnDisabled,
+                                           /*output_rpm=*/10.0, /*stopping=*/true));
+    CHECK(!shouldHoldEnableForDisableGate(Cia402State::ReadyToSwitchOn,
+                                           /*output_rpm=*/10.0, /*stopping=*/true));
+    CHECK(!shouldHoldEnableForDisableGate(Cia402State::SwitchedOn,
+                                           /*output_rpm=*/10.0, /*stopping=*/true));
+    CHECK(!shouldHoldEnableForDisableGate(Cia402State::Fault,
+                                           /*output_rpm=*/10.0, /*stopping=*/true));
+}

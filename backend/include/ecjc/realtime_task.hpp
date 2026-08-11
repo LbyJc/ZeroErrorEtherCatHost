@@ -146,6 +146,11 @@ private:
     bool     mode_matched_ = false;
     double   hold_position_deg_ = 0;
     uint64_t disable_wait_cycles_ = 0;
+    // 软停超时告警只锁存一次：等待期内每拍都满足超时条件，不能每拍都重跑
+    // %f snprintf 覆盖 last_error（1kHz 热路径 + GUI 侧看到的错误信息一直在
+    // 抖动的小数位，误导人以为在不断报新错）。等门控通过/复位时清掉锁存，
+    // 下一次软停超时要能重新报警。
+    bool     last_error_latched_ = false;
 
     SpscRing<Sample> log_ring_, gui_ring_;
 

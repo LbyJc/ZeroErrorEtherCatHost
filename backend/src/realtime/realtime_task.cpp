@@ -152,16 +152,63 @@ void RealtimeTask::threadMain() {
         cycle(now);
     }
 
-    // 退出前把输出清零并撤使能，不要让从站带着最后一条命令留在 OP
-    for (int i = 0; i < 50 && bus_->phase() == BusPhase::Active; ++i) {
-        bus_->receive();
-        RawIo z{};
-        z.controlword = cw::kCmdDisableVoltage;
-        z.modes_of_operation = raw_.modes_of_operation;
-        bus_->writeOutputs(z);
-        bus_->send(nowMonotonicNs());
-        addNs(&wakeup, cycle_ns);
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup, nullptr);
+    // 退出前把输出清零并撤使能，不要让从站带着最后一条命令留在 OP。
+    //
+    // 终审 finding I3：这是 RT 侧**第二个**真的会把控制字拍成 DisableVoltage
+    // 的地方（第一个是上面 cycle() 里那份门控）。requestStop() 可能在任意
+    // 时刻被别的路径直接调用——RealtimeTask 析构函数就是一个，main.cpp 的
+    // 等待循环超时后 break 也照样走到这，C2 场景下看门狗杀进程前的收尾同样
+    // 可能撞上这里。原来这段无条件拍 50 拍 DisableVoltage、完全不看当前速度，
+    // 等于绕开了 cycle() 里千辛万苦加上的软停门控——高速旋转时一样会把制动器
+    // 烧了。这里必须用同一套判据（shouldHoldEnableForDisableGate /
+    // isSafeToDisableAt / disableWaitTimedOut）、同一个 disable_wait_cycles_
+    // 计数器（不重新清零、不另开一份预算，续用 cycle() 里已经攒的等待时间），
+    // 分两段做：
+    //   阶段一：门控等待——不安全就继续维持 EnableOperation，直到变安全或
+    //           超时（与主循环共用 disable_timeout_cycles 这个预算）。
+    //   阶段二：确认撤能——有界 50 拍，把控制字真正拍成 DisableVoltage。
+    {
+        while (bus_->phase() == BusPhase::Active) {
+            bus_->receive();
+            bus_->readInputs(&raw_);
+            scaling_.toPhysical(raw_, &joint_);
+
+            if (!shouldHoldEnableForDisableGate(cia_.state(), joint_.output_vel_rpm,
+                                                 /*stopping=*/false)) {
+                break;   // 已经安全，或者本来就没有力矩：直接进入阶段二
+            }
+
+            cia_.setTarget(Cia402Target::EnableOperation);
+            ++disable_wait_cycles_;
+            if (disableWaitTimedOut(disable_wait_cycles_, cfg_.stop_ramp.disable_timeout_cycles))
+                break;   // 超时兜底：不再等，进入阶段二强制撤能
+
+            const uint16_t cw = cia_.update(raw_.statusword);
+            RawIo z = raw_;
+            z.controlword = cw;
+            // 不追新的运动指令，只维持使能——目标钉在当前实测值上
+            z.target_position = raw_.position_actual;
+            z.target_velocity = 0;
+            z.target_torque = 0;
+            bus_->writeOutputs(z);
+            bus_->send(nowMonotonicNs());
+            addNs(&wakeup, cycle_ns);
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup, nullptr);
+        }
+
+        cia_.setTarget(Cia402Target::DisableVoltage);
+        for (int i = 0; i < 50 && bus_->phase() == BusPhase::Active; ++i) {
+            bus_->receive();
+            bus_->readInputs(&raw_);
+            const uint16_t cw = cia_.update(raw_.statusword);
+            RawIo z{};
+            z.controlword = cw;
+            z.modes_of_operation = raw_.modes_of_operation;
+            bus_->writeOutputs(z);
+            bus_->send(nowMonotonicNs());
+            addNs(&wakeup, cycle_ns);
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup, nullptr);
+        }
     }
     thread_running_.store(false, std::memory_order_release);
 }
@@ -210,21 +257,35 @@ void RealtimeTask::cycle(int64_t now_ns) {
 
     // 撤使能类目标必须等软停真正完成。否则控制字下一拍就切电，
     // 而斜坡还在数——手册 §7.1：>2.5 rpm 抱闸会永久损坏运动组件。
+    //
+    // 但"等软停"只在驱动器**当前确已带着力矩**（OperationEnabled）时才有意义
+    // （见 shouldHoldEnableForDisableGate 的注释，终审 finding I2）：否则外力
+    // 反驱关节超过安全转速时，这条门控会错误地把已经掉到更低状态的驱动器
+    // 又拉回 EnableOperation——没有操作员动作的"自励磁"。
     {
         const auto want = static_cast<Cia402Target>(desired_target_.load(std::memory_order_relaxed));
         const bool is_disable = (want == Cia402Target::DisableVoltage);
-        if (is_disable && !isSafeToDisableAt(joint_.output_vel_rpm,
-                                             stopping_.load(std::memory_order_relaxed))) {
+        if (is_disable && shouldHoldEnableForDisableGate(cia_.state(), joint_.output_vel_rpm,
+                                                           stopping_.load(std::memory_order_relaxed))) {
             cia_.setTarget(Cia402Target::EnableOperation);   // 维持使能，让斜坡把速度压下来
+                                                              // （条件自持：只要还在 OperationEnabled
+                                                              // 且不安全，下一拍解码出来的状态还是
+                                                              // OperationEnabled，会继续进这个分支）
             ++disable_wait_cycles_;
             if (disableWaitTimedOut(disable_wait_cycles_, cfg_.stop_ramp.disable_timeout_cycles)) {
                 cia_.setTarget(want);                        // 超时兜底，避免永远停不下来
-                snprintf(snap_.last_error, sizeof snap_.last_error,
-                         "软停超时（%llu 拍），强制撤使能，转速 %.2f rpm",
-                         (unsigned long long)disable_wait_cycles_, joint_.output_vel_rpm);
+                if (!last_error_latched_) {
+                    // 只在超时刚发生的这一拍写一次，不要每拍重跑 %f snprintf
+                    // 且永久覆盖 last_error（Minor finding）。
+                    snprintf(snap_.last_error, sizeof snap_.last_error,
+                             "软停超时（%llu 拍），强制撤使能，转速 %.2f rpm",
+                             (unsigned long long)disable_wait_cycles_, joint_.output_vel_rpm);
+                    last_error_latched_ = true;
+                }
             }
         } else {
             disable_wait_cycles_ = 0;
+            last_error_latched_ = false;   // 复位，下次软停超时要能重新报警
             cia_.setTarget(want);
         }
     }
