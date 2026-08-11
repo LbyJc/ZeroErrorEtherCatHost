@@ -271,11 +271,20 @@ bool IpcServer::start(const std::string& path, std::string* err) {
     quit_.store(false);
     accept_th_ = std::thread([this] { threadMain(); });
     telemetry_th_ = std::thread([this] { telemetryLoop(); });
+    grace_th_ = std::thread([this] { graceLoop(); });
     return true;
 }
 
 void IpcServer::stop() {
     quit_.store(true);
+    // 唤醒 graceLoop()：不管它是在空等还是在某次宽限倒计时里，quit_ 一旦为真
+    // 都要让它尽快退出，不能等它自己的 200ms 轮询周期。
+    {
+        std::lock_guard<std::mutex> lk(grace_mu_);
+        grace_pending_ = false;
+        ++grace_epoch_;
+    }
+    grace_cv_.notify_all();
     if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR); ::close(listen_fd_); listen_fd_ = -1; }
 
     // shutdown 而不是 close：让各客户端线程的阻塞 read() 立刻返回 0 退出，
@@ -293,6 +302,7 @@ void IpcServer::stop() {
 
     if (accept_th_.joinable()) accept_th_.join();
     if (telemetry_th_.joinable()) telemetry_th_.join();
+    if (grace_th_.joinable()) grace_th_.join();
     if (!socket_path_.empty()) ::unlink(socket_path_.c_str());
 }
 
@@ -335,6 +345,10 @@ void IpcServer::threadMain() {
             }
             clients_.push_back(fd);
         }
+        // 任何客户端连入都取消可能在跑的重连宽限倒计时——不需要判断这是不是
+        // "原来那个"GUI：IPC 协议本来就不区分客户端身份，有人连上来就说明
+        // 不是"没人了"。
+        cancelReconnectGrace();
 
         log("INFO", "客户端已连接");
         // 新客户端先单独收一份当前状态，不用等下一个广播周期
@@ -390,21 +404,34 @@ void IpcServer::dropClient(int fd) {
     // 线程对同一个 fd 各 close 一次——万一中间被新 accept() 复用了同一个数字，
     // 二次 close 会误关一个完全不相干的新连接。
     bool last = false;
+    bool was_evicted = false;
     {
         std::lock_guard<std::mutex> lk(clients_mu_);
         for (size_t i = 0; i < clients_.size(); ++i) {
             if (clients_[i] == fd) { clients_.erase(clients_.begin() + i); break; }
         }
+        was_evicted = evicted_fds_.erase(fd) > 0;
         last = clients_.empty();
     }
     forgetClient(fd);
     ::close(fd);
 
-    // 只有**最后一个**客户端断开才算"失去操作者"。
+    // 只有**最后一个**客户端消失才可能"失去操作者"。
     // 多客户端下若任一断开就停机，调试脚本退出会误停实验。
     if (last && !quit_.load()) {
-        rt_->stopRun();
-        log("WARNING", "最后一个客户端已断开，已停止运行（伺服保持使能状态）");
+        if (was_evicted) {
+            // 这不是操作者主动走人，是被服务端踢的（慢客户端/协议撕裂）——
+            // GUI 大概率几秒内就会自动重连（gui/ipc_client.py 的重试定时器）。
+            // 给一个宽限期而不是立刻停，见 evicted_fds_/kReconnectGraceSec 的注释
+            // （finding C3）。
+            log("WARNING", "最后一个客户端因读取过慢/协议撕裂被断开，"
+                            "进入" + std::to_string(kReconnectGraceSec) +
+                            "s 重连宽限期，暂不停止运行");
+            beginReconnectGrace();
+        } else {
+            rt_->stopRun();
+            log("WARNING", "最后一个客户端已断开，已停止运行（伺服保持使能状态）");
+        }
     }
 }
 
@@ -415,20 +442,89 @@ void IpcServer::evictClient(int fd) {
     // 唤醒所有客户端线程用的是同一个模式，见 stop() 的注释）。
     // 如果这个 fd 还没有 serveClient 线程（accept 阶段的首次单发就撞上问题），
     // 调用方（threadMain）负责检测"不在 clients_ 里了"并自己收尾 close()。
+    //
+    // finding I5：只有在 clients_mu_ 下"抢到了 erase"（这个 fd 确实还在
+    // clients_ 里、还没被 dropClient 摘过）的调用才去 shutdown()。原来的写法
+    // 是"先解锁再无条件 shutdown"，如果这个 fd 在 evictClient 拿到锁之前已经
+    // 被 dropClient() erase+close()，操作系统可能早把这个数字复用给一个全新的
+    // accept() 连接——这里的 shutdown() 就会打死一个完全无辜的新连接。
+    // erase 成功与否天然是"谁先抢到"的判定，不需要额外加状态。
+    bool erased = false;
     {
         std::lock_guard<std::mutex> lk(clients_mu_);
         for (size_t i = 0; i < clients_.size(); ++i) {
-            if (clients_[i] == fd) { clients_.erase(clients_.begin() + i); break; }
+            if (clients_[i] == fd) { clients_.erase(clients_.begin() + i); erased = true; break; }
         }
+        // 标记"这是被踢的"，供 dropClient() 判定是否要走重连宽限期（finding C3）。
+        // 必须和上面的 erase 在同一段临界区里做，避免和 dropClient() 之间出现
+        // "erase 了但还没来得及标记"的窗口。
+        if (erased) evicted_fds_.insert(fd);
     }
-    ::shutdown(fd, SHUT_RDWR);
+    if (erased) ::shutdown(fd, SHUT_RDWR);
 }
 
 void IpcServer::forgetClient(int fd) {
-    // fd 会被后续 accept() 复用；不清掉的话，新连接可能"继承"到旧连接的丢帧史，
-    // 导致它真正第一次丢帧时反而不记日志，或者刚连上就因为"计数已经很高"被误踢。
-    std::lock_guard<std::mutex> lk(slow_client_mu_);
-    per_client_drops_.erase(fd);
+    // fd 会被后续 accept() 复用；不清掉的话，新连接可能"继承"到旧连接的丢帧史/
+    // "被踢过"标记，导致它真正第一次丢帧时反而不记日志、或者刚连上就因为
+    // "计数已经很高"被误踢、或者被误判为"是重连回来的被踢连接"。
+    {
+        std::lock_guard<std::mutex> lk(slow_client_mu_);
+        per_client_drops_.erase(fd);
+    }
+    {
+        std::lock_guard<std::mutex> lk(clients_mu_);
+        evicted_fds_.erase(fd);
+    }
+}
+
+void IpcServer::beginReconnectGrace() {
+    std::lock_guard<std::mutex> lk(grace_mu_);
+    grace_pending_ = true;
+    ++grace_epoch_;
+    grace_cv_.notify_all();
+}
+
+void IpcServer::cancelReconnectGrace() {
+    std::lock_guard<std::mutex> lk(grace_mu_);
+    if (grace_pending_) {
+        grace_pending_ = false;
+        ++grace_epoch_;
+        grace_cv_.notify_all();
+    }
+}
+
+void IpcServer::graceLoop() {
+    std::unique_lock<std::mutex> lk(grace_mu_);
+    while (!quit_.load()) {
+        if (!grace_pending_) {
+            grace_cv_.wait_for(lk, std::chrono::milliseconds(200));
+            continue;
+        }
+        const uint64_t my_epoch = grace_epoch_;
+        const auto deadline = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(kReconnectGraceSec);
+        // 谁先变化都会把我们唤醒：quit_、grace_epoch_（被 cancel 或被新一轮
+        // begin 顶替）、或者单纯的 200ms 轮询节拍（用于定期检查 deadline）。
+        while (grace_pending_ && grace_epoch_ == my_epoch && !quit_.load() &&
+               std::chrono::steady_clock::now() < deadline) {
+            grace_cv_.wait_for(lk, std::chrono::milliseconds(200));
+        }
+        if (quit_.load()) break;
+        if (grace_pending_ && grace_epoch_ == my_epoch) {
+            // 到期了，期间没有被取消（没有新客户端连入）、也没有被更新的一轮
+            // 顶替——真的等够了 kReconnectGraceSec 秒都没人回来。
+            grace_pending_ = false;
+            lk.unlock();
+            if (!hasClient() && !quit_.load()) {
+                rt_->stopRun();
+                log("WARNING", "重连宽限期（" + std::to_string(kReconnectGraceSec) +
+                                "s）已过，仍无客户端连接，已停止运行（伺服保持使能状态）");
+            }
+            lk.lock();
+        }
+        // 否则：要么被取消了（新客户端连入），要么被新一轮 begin 顶替
+        // （连续多次踢出），什么都不用做，回到循环顶部重新判断。
+    }
 }
 
 void IpcServer::sendFrameTo(int fd, uint16_t type, const void* payload, size_t len) {
@@ -463,9 +559,17 @@ void IpcServer::sendFrameTo(int fd, uint16_t type, const void* payload, size_t l
         // 帧发到一半才失败：接收侧是纯长度前缀流，没有重同步能力，这条连接的
         // 协议流已经不可恢复地失步了——必须断开，不能只丢这一帧，否则后续帧的
         // 头会被当成上一帧没发完的 payload 解析，永久错位（见头文件里的说明）。
+        //
+        // finding C1：evictClient() 必须先于 log() 调用。log() 内部走
+        // sendJson()→sendFrame()，会对 clients_ 取一份快照广播——如果这个 fd
+        // 还在快照里，就会对它再发一帧，大概率再次超时/失败，又落回这个 Torn
+        // 分支，又调用 log()……无界递归，每层约 200ms（sendmsg 的超时），
+        // 直到栈耗尽 SIGSEGV。先 evictClient(fd) 把它从 clients_ 摘掉、
+        // shutdown() 掉，log() 广播时的快照里就不会再有它，递归在这里天然
+        // 掐断，不需要额外的重入锁或标志位。
+        evictClient(fd);
         log("WARNING", "客户端读取过慢，帧发送到一半超时/失败，协议流已撕裂，主动断开该连接，fd=" +
                         std::to_string(fd));
-        evictClient(fd);
         return;
     }
 
@@ -497,9 +601,13 @@ void IpcServer::sendFrameTo(int fd, uint16_t type, const void* payload, size_t l
         // 一直卡在帧边界、从没触发过上面的 Torn 分支，说明这条连接长期发不出去
         // 数据——不主动踢的话它会永久占着连接名额，且每次广播都要在它身上等满
         // 200ms 才能轮到下一个客户端。300 次×最多 200ms ≈ 累计 60s 之后判定放弃。
+        //
+        // 同 Torn 分支（finding C1）：evictClient() 必须先于 log()，否则 log()
+        // 广播时这个 fd 还在 clients_ 快照里，会再次超时、再次满足这个条件、
+        // 再次 log()——无界递归。
+        evictClient(fd);
         log("WARNING", "客户端长期无法发送（累计丢帧 " + std::to_string(fd_drops) +
                         " 次），判定为长期失联，主动断开，fd=" + std::to_string(fd));
-        evictClient(fd);
     }
 }
 
