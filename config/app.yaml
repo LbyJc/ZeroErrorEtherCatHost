@@ -1,0 +1,22 @@
+app:
+  name: "EtherCAT Joint Control"
+  version: "0.1.0"
+
+  auto_start_master: false     # 启动软件时自动启动 EtherCAT 主站
+  auto_start_backend: false
+  # 以下三项按任务书第十二节强制为 false，不提供开关：
+  #   自动 Servo Enable / 自动 Run / 自动开始采集
+
+  socket_path: "/run/ethercat-joint-control/control.sock"
+  # 开发模式下 backend 以普通方式启动时用的回退路径
+  socket_path_dev: "/tmp/ecjc-control.sock"
+
+  data_dir: "data"
+  log_dir: "logs"
+
+  helper: "/opt/ethercat-joint-control/bin/ecjc-helper"
+
+logging:
+  level: INFO                  # DEBUG / INFO / WARNING / ERROR
+  file_max_mb: 50
+  keep_files: 10

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=EtherCAT Joint Control
+Name[zh_CN]=EtherCAT 关节控制
+Comment=Realtime EtherCAT servo joint control, tuning and data acquisition
+Comment[zh_CN]=EtherCAT 伺服关节实时控制、在线调参与数据采集
+Exec=/opt/ethercat-joint-control/bin/ecjc-gui
+Icon=/opt/ethercat-joint-control/share/ecjc.svg
+Terminal=false
+Categories=Development;Engineering;Science;
+Keywords=EtherCAT;servo;robot;joint;CiA402;
+StartupNotify=true

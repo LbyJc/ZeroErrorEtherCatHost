@@ -1,0 +1,38 @@
+gui:
+  plot_fps: 50                 # 绘图刷新率，与控制周期、采样率完全独立
+  telemetry_publish_hz: 100    # Backend 向 GUI 推送遥测的频率
+
+  # 抽稀时每组保留 min/max 两点，避免丢掉尖峰
+  decimate_keep_extremes: true
+
+  default_x_window_s: 10
+  x_window_choices: [5, 10, 30, 60, 300]
+
+  plots:
+    - id: position
+      title: "位置 / deg"
+      series: [target_position_deg, motor_position_deg, output_position_deg]
+      auto_y: true
+      y_min: 0.0
+      y_max: 360.0
+    - id: velocity
+      title: "转速 / rpm"
+      series: [target_velocity_rpm, motor_velocity_rpm, output_velocity_rpm]
+      auto_y: true
+      y_min: -500.0
+      y_max: 500.0
+    - id: current
+      title: "电机电流 / A"
+      series: [motor_current_A]
+      auto_y: true
+      y_min: -10.0
+      y_max: 10.0
+    - id: torque
+      title: "力矩 / Nm"
+      series: [target_torque_Nm, actual_torque_Nm]
+      auto_y: true
+      y_min: -20.0
+      y_max: 20.0
+
+  # 位置显示：wrapped 到 [0,360)，但底层同时保留 raw 与 unwrapped
+  position_display_wrapped: true

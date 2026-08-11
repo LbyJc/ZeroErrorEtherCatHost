@@ -1,0 +1,56 @@
+# 控制器配置
+#
+# 注意：参数表不是写死在 GUI 里的。每个控制器在 declareParams() 里自报
+# 名字/单位/范围/默认值，Backend 把这张表通过 IPC 发给 GUI，
+# GUI 的调参页面据此**动态生成**控件。加新控制器不需要改 GUI 一行代码。
+# 下面的值只是覆盖控制器内置默认值的初始配置。
+
+controller:
+  default: passthrough
+
+  available:
+    - id: passthrough
+      name: "直通 (Passthrough)"
+      modes: [CSP, CSV, CST]
+      description: "轨迹给定直接下发给驱动器，不加任何外环。用于验证链路和标定。"
+
+    - id: pid_position
+      name: "位置环 PID"
+      modes: [CST]
+      description: "外部位置环，输出力矩。用于 CST 下的位置控制实验。"
+      params:
+        pos_kp: 0.8
+        pos_ki: 0.0
+        pos_kd: 0.02
+
+    - id: pid_velocity
+      name: "速度环 PID"
+      modes: [CST]
+      description: "外部速度环，输出力矩。"
+      params:
+        vel_kp: 0.05
+        vel_ki: 0.5
+        vel_kd: 0.0
+
+    - id: cst_custom
+      name: "自研 CST 控制器"
+      modes: [CST]
+      description: "自研算法接入点。当前为骨架，参数已预留。"
+      params:
+        gamma: 1.0
+        lambda: 5.0
+        nn_learning_rate: 0.01
+        adaptive_gain: 0.1
+        friction_comp: 0.0
+
+  # 输出硬上限，控制器算出多少都会被裁到这里面
+  output_limits:
+    torque_Nm: 20.0
+    torque_rate_Nm_per_s: 100.0      # 力矩变化率限制，防止阶跃冲击
+
+    # 目标速度变化率上限（电机侧 rpm/s）。0→100 rpm 需要 0.5 秒。
+    # 真机实测：不加这个限制，Constant 轨迹一开跑就是阶跃指令，
+    # 驱动器实际速度跟不上 → 状态字 bit7 置位、0x3B68 报 0xFF00
+    # 「软速度误差警告」（阈值见 0x3B61 Soft Velocity Following Error Window）。
+    # 不是故障、不停机，但说明指令 profile 太生硬。
+    velocity_rate_rpm_per_s: 200.0

@@ -1,0 +1,57 @@
+# PDO 映射配置
+#
+# 依据 ESI 文件 ZeroErr+Driver_V3.2.0.xml。规矩（第一次配错踩过）：
+#   · 除 0x1600 / 0x1A00 是 Fixed="0" 外，其余 PDO 全是 Fixed="1"
+#   · 正确做法是用 0x1C12 / 0x1C13 **分配**厂商预定义的 PDO，不要重写条目表
+#   · 下面 entries 逐条抄自 ESI，顺序和位宽必须完全一致，IgH 比对一致后就不会去改映射
+#
+# RxPDO 选 0x1605 而不是 0x1609：0x1609 缺 0x6071 目标力矩，CST 模式没法用。
+# 0x1605 一个 PDO 同时带 目标位置/目标速度/目标力矩/最大力矩/控制字/运行模式，
+# 三种模式共用一套映射，切模式不需要重新配 PDO。
+# 0x1605 只与 0x1600~0x1604、0x1606 互斥，单独使用无冲突。
+
+pdo:
+  rx:                             # 主站 → 从站 (SM2)
+    - index: 0x1605
+      watchdog: true
+      entries:
+        - {index: 0x607A, sub: 0x00, bits: 32, type: i32, name: target_position}
+        - {index: 0x60FF, sub: 0x00, bits: 32, type: i32, name: target_velocity}
+        - {index: 0x6071, sub: 0x00, bits: 16, type: i16, name: target_torque}
+        - {index: 0x6072, sub: 0x00, bits: 16, type: u16, name: max_torque}
+        - {index: 0x6040, sub: 0x00, bits: 16, type: u16, name: controlword}
+        - {index: 0x6060, sub: 0x00, bits:  8, type: i8,  name: modes_of_operation}
+        - {index: 0x0000, sub: 0x00, bits:  8, type: pad, name: _dummy}
+
+  tx:                             # 从站 → 主站 (SM3)。0x1A05 之后无 Exclude，可叠加
+    - index: 0x1A06
+      entries:
+        - {index: 0x603F, sub: 0x00, bits: 16, type: u16, name: error_code}
+        - {index: 0x6041, sub: 0x00, bits: 16, type: u16, name: statusword}
+        - {index: 0x6064, sub: 0x00, bits: 32, type: i32, name: position_actual}
+        - {index: 0x606C, sub: 0x00, bits: 32, type: i32, name: velocity_actual}
+        - {index: 0x6077, sub: 0x00, bits: 16, type: i16, name: torque_actual}
+        - {index: 0x6061, sub: 0x00, bits:  8, type: i8,  name: modes_display}
+        - {index: 0x0000, sub: 0x00, bits:  8, type: pad, name: _dummy}
+    - index: 0x1A07
+      entries:
+        - {index: 0x20A0, sub: 0x00, bits: 32, type: i32, name: output_position}
+    - index: 0x1A0D
+      entries:
+        - {index: 0x6063, sub: 0x00, bits: 32, type: i32, name: position_counts}
+    - index: 0x1A1F
+      entries:
+        - {index: 0x6078, sub: 0x00, bits: 16, type: i16, name: current_actual}
+    - index: 0x1A08
+      entries:
+        - {index: 0x3B68, sub: 0x00, bits: 32, type: u32, name: warning_code}
+        - {index: 0x3B69, sub: 0x00, bits: 32, type: i32, name: vendor_torque}
+        - {index: 0x3B6A, sub: 0x00, bits: 16, type: i16, name: torque_ratio}
+
+# ── 电机侧位置：只能异步 SDO ──────────────────────────────────────────────
+# 0x2240 "Motor Encoder Position" 不在任何 PDO 里（已遍历 ESI 全部 RxPdo/TxPdo 确认）。
+# 因此用 ecrt_slave_config_create_sdo_request() 建异步请求，在 RT 循环里非阻塞轮询。
+# 代价：它的采样时刻与 PDO 不同步，短窗口内会有偏移——标定时窗口要取长（≥30s）。
+async_sdo:
+  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position, poll_divisor: 1}
+  - {index: 0x2241, sub: 0x00, type: i32, name: dual_encoder_diff, poll_divisor: 100}

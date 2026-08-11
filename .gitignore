@@ -1,0 +1,8 @@
+build/
+data/
+logs/
+config.bak.*/
+__pycache__/
+*.pyc
+*.h5
+.superpowers/

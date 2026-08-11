@@ -1,0 +1,74 @@
+#!/bin/bash
+# ecjc-helper —— 需要 root 的少数几个动作，经 pkexec 调用。
+#
+# 设计原则（任务书第十一节）：
+#   · GUI 本身**不以 root 运行**
+#   · 需要特权的动作收敛到这一个脚本里，动作是白名单式的，不接受任意命令
+#   · 不保存任何密码，pkexec 每次按 polkit 策略决定是否弹框
+set -euo pipefail
+
+SERVICE=ethercat-joint-control.service
+
+# IgH 主站的启动路径。本机的坑：systemd 的 ethercat.service 读
+# /usr/local/etc/ethercat.conf，而该文件里 MASTER0_DEVICE="" 是空的，
+# 所以 systemctl start ethercat 必然失败；实际可用的是 init.d 脚本
+# （它读 /etc/sysconfig/ethercat）。这里先试 systemd，失败回落 init.d，
+# 并把用的是哪条路径打印出来，免得以后又踩一次。
+IGH_INITD=/usr/local/etc/init.d/ethercat
+
+start_master() {
+    if systemctl is-active --quiet ethercat.service; then
+        echo "IgH 主站已在运行 (systemd)"
+        return 0
+    fi
+    if systemctl start ethercat.service 2>/dev/null; then
+        echo "IgH 主站已启动 (systemd: ethercat.service)"
+        return 0
+    fi
+    if [[ -x "$IGH_INITD" ]]; then
+        echo "systemd 路径失败，回落到 init.d 脚本"
+        "$IGH_INITD" start
+        echo "IgH 主站已启动 (init.d: $IGH_INITD)"
+        return 0
+    fi
+    echo "无法启动 IgH 主站：systemd 单元失败且未找到 $IGH_INITD" >&2
+    return 1
+}
+
+stop_master() {
+    systemctl stop ethercat.service 2>/dev/null || {
+        [[ -x "$IGH_INITD" ]] && "$IGH_INITD" stop
+    }
+    echo "IgH 主站已停止"
+}
+
+case "${1:-}" in
+    start)
+        start_master
+        systemctl start "$SERVICE"
+        echo "Backend 已启动"
+        ;;
+    stop)
+        # 先停 Backend（它会走完安全停机顺序），再停主站
+        systemctl stop "$SERVICE" || true
+        stop_master
+        ;;
+    restart)
+        systemctl stop "$SERVICE" || true
+        start_master
+        systemctl start "$SERVICE"
+        ;;
+    status)
+        echo "--- IgH 主站 ---"
+        systemctl is-active ethercat.service 2>/dev/null || echo "inactive"
+        [[ -e /dev/EtherCAT0 ]] && echo "/dev/EtherCAT0 存在" || echo "/dev/EtherCAT0 缺失"
+        echo "--- Backend ---"
+        systemctl is-active "$SERVICE" 2>/dev/null || echo "inactive"
+        ;;
+    master-only-start) start_master ;;
+    master-only-stop)  stop_master ;;
+    *)
+        echo "用法: $0 {start|stop|restart|status|master-only-start|master-only-stop}" >&2
+        exit 2
+        ;;
+esac

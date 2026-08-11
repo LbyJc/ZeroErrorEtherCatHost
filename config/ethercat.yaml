@@ -1,0 +1,27 @@
+# EtherCAT 主站与实时任务配置
+ethercat:
+  master_index: 0
+  interface: enp3s0            # 现场网卡；install.sh 会校验其存在性
+  cycle_us: 1000               # 控制周期。硬件下限 500us（见 slave.yaml min_cycle_us），
+                               # 但本机内核未做 CPU 隔离，500us 下抖动尾部会触发
+                               # 驱动器 0xA000 通信异常故障，故暂用 1000us 留余量。
+                               # 重启并加 isolcpus/nohz_full/rcu_nocbs 后可改回 500。
+                               # 注意：本机内核为 PREEMPT_DYNAMIC 而非 PREEMPT_RT，
+                               # 250us 以下不保证，抖动指标以 GUI 实测为准
+  dc_enabled: true             # 分布式时钟。现场曾出现 "Slave did not sync after 5000ms"，
+                               # 若进 OP 过慢可置 false 退化为 SM 同步
+  dc_assign_activate: 0x0300   # 来自 ESI <Dc><OpMode> AssignActivate
+  dc_sync0_shift_ns: 0
+
+  op_timeout_ms: 10000         # 等待从站进入 OP 的超时
+  wc_error_tolerance: 5        # 连续 WC 异常多少个周期后判定通信故障
+
+realtime:
+  sched_priority: 80           # SCHED_FIFO 优先级
+  cpu_affinity: [2]             # 实时线程独占 cpu2；网卡中断已迁到 cpu1，别让两者抢核
+  stack_prefault_kb: 8192
+  lock_memory: true            # mlockall
+
+  # ring buffer 容量（样本数，必须是 2 的幂）
+  log_ring_capacity: 16384     # 1kHz 下约 16 秒缓冲
+  gui_ring_capacity: 4096

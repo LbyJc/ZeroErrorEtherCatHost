@@ -1,0 +1,40 @@
+[Unit]
+Description=EtherCAT Joint Control Realtime Backend
+Documentation=file:/opt/ethercat-joint-control/docs/ARCHITECTURE.md
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/ethercat-joint-control/bin/ecjc-backend --config /etc/ethercat-joint-control
+User=root
+# ⚠ Group 必须是 ethercat，不能是 root。
+# RuntimeDirectory 的属主取自 User/Group：写成 root:root 0750 时，
+# 普通用户**无法穿越该目录**，socket 上给的组权限就成了摆设——
+# 表现是 GUI 一直"未连接"，而 socket 权限看上去明明是对的。
+# uid 仍是 0，实时优先级与 /dev/EtherCAT0 的访问不受影响。
+Group=ethercat
+
+# socket 建在这里，停止时由 systemd 自动清理
+RuntimeDirectory=ethercat-joint-control
+RuntimeDirectoryMode=0750
+
+# 实时任务需要：SCHED_FIFO 优先级 + 锁内存（禁止换出造成缺页抖动）
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+LimitNICE=-20
+
+# 把实时线程与系统其余负载隔开。核号需与 ethercat.yaml 的 cpu_affinity 对应，
+# 且不要与 GUI 抢同一个核。
+# CPUAffinity=2 3
+
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+# 给足时间走完安全停机顺序：停轨迹 → 归零 → 撤使能 → deactivate → 释放主站
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

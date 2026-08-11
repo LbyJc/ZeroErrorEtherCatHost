@@ -1,0 +1,45 @@
+# 物理量转换系数
+# 全部来自 2026-08-10 实测标定，不是估计值。详见 docs/ARCHITECTURE.md §17
+scaling:
+  # ── 编码器 ────────────────────────────────────────────────────────────
+  motor_encoder_counts_per_rev: 131072     # 2^17，由实测计数比反推
+  output_encoder_counts_per_rev: 524288    # 2^19，沿用厂商 demo ENCODER_RES
+
+  # ✓ 2026-08-10 已用物理转角验证。
+  #   方法：输出法兰做记号，按计数闭环走 262144 个 0x6064 计数
+  #   （= 2^19 假设下的半圈），实际走了 263509 counts。
+  #   观测结果：记号停在**对面**（约 181°）。
+  #   若输出侧实为 2^18，同样的计数会转满一整圈回到原位；若是 2^20 则只转 90°。
+  #   三者相差成倍，肉眼即可判别，故该结论是确定的。
+  #   注意不能走整圈来验证：524288 counts 在 2^19 下是 1 圈、2^18 下是 2 圈，
+  #   记号两种情况都回原位，测了等于没测。
+  #   验证脚本：tests/verify_encoder.py
+  encoder_resolution_verified: true
+
+  gear_ratio: 121.0                        # 实测 Δ0x2240/Δ0x6064 = 30.24 ≈ 121/4
+                                           # 铭牌 eRob80H120I 的 120 是标称值
+  gear_ratio_source: "measured 2026-08-10 (nameplate says 120)"
+
+  # ── 速度 ──────────────────────────────────────────────────────────────
+  # 0x60FF / 0x606C 的单位就是 0x6064 的 counts/s（实测增益 1.0006）
+  velocity_unit_counts_per_sec: true
+  velocity_gain_correction: 1.0            # 若实测增益偏离 1 可在此补偿
+
+  # ── 电流 / 力矩 ───────────────────────────────────────────────────────
+  # 0x6078 / 0x6077 是额定值的千分比 (per mille)
+  rated_current_mA: 6300                   # 0x6075 铭牌
+  rated_torque_mNm: 31000                  # 0x6076 铭牌
+  current_scale: 0.001                     # raw × scale × rated → 实际值
+  torque_scale: 0.001
+
+  # ── 方向 ──────────────────────────────────────────────────────────────
+  position_direction: 1                    # +1 / -1
+  velocity_direction: 1
+  current_direction: 1
+
+  # ── 软限位（仅用于 GUI 告警与 Target 合法性检查，不替代驱动器内部限位）──
+  limits:
+    motor_velocity_rpm_max: 3000
+    output_velocity_rpm_max: 25
+    torque_Nm_max: 20.0                    # 远低于额定 31 Nm，实验安全余量
+    current_A_max: 6.3

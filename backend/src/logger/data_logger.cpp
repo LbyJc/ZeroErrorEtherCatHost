@@ -1,0 +1,370 @@
+#include "ecjc/data_logger.hpp"
+
+#include <hdf5.h>
+
+#include <sys/statvfs.h>
+
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <mutex>
+
+namespace ecjc {
+namespace fs = std::filesystem;
+namespace {
+
+constexpr size_t kBatch = 1000;          // 一次写 1000 个样本（1 kHz 下 = 1 秒）
+constexpr hsize_t kChunk = 4096;
+
+std::string nowString() {
+    const auto now = std::chrono::system_clock::now();
+    const auto t = std::chrono::system_clock::to_time_t(now);
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        now.time_since_epoch()).count() % 1000000;
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char buf[64];
+    strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tmv);
+    char out[80];
+    snprintf(out, sizeof out, "%s.%06ld", buf, static_cast<long>(us));
+    return out;
+}
+
+std::string fileStamp() {
+    const auto t = std::time(nullptr);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char buf[32];
+    strftime(buf, sizeof buf, "%Y%m%d_%H%M%S", &tmv);
+    return buf;
+}
+
+double diskFreeGb(const std::string& path) {
+    struct statvfs s;
+    if (statvfs(path.c_str(), &s) != 0) return -1.0;
+    return double(s.f_bavail) * double(s.f_frsize) / 1e9;
+}
+
+// 一个字段 = 一个可扩展 dataset
+struct Column {
+    const char* name;
+    hid_t type;
+    hid_t dset = -1;
+    hsize_t rows = 0;
+};
+
+}  // namespace
+
+struct DataLogger::Impl {
+    hid_t file = -1;
+    hid_t group = -1;
+    std::vector<Column> cols;
+    std::vector<double> scratch;      // 一列一批的临时缓冲，启动时分配好
+    std::vector<int64_t> scratch_i64;
+    std::vector<int32_t> scratch_i32;
+    std::vector<uint32_t> scratch_u32;
+    std::vector<uint16_t> scratch_u16;
+    std::vector<uint8_t>  scratch_u8;
+    std::vector<Sample> batch;
+};
+
+DataLogger::DataLogger(const FullConfig& cfg, SpscRing<Sample>* ring)
+    : cfg_(cfg), ring_(ring), impl_(std::make_unique<Impl>()) {
+    impl_->batch.resize(kBatch);
+    impl_->scratch.resize(kBatch);
+    impl_->scratch_i64.resize(kBatch);
+    impl_->scratch_i32.resize(kBatch);
+    impl_->scratch_u32.resize(kBatch);
+    impl_->scratch_u16.resize(kBatch);
+    impl_->scratch_u8.resize(kBatch);
+    th_ = std::thread([this] { threadMain(); });
+}
+
+DataLogger::~DataLogger() {
+    quit_.store(true);
+    if (th_.joinable()) th_.join();
+    closeFile();
+}
+
+bool DataLogger::start(const RecordingMeta& meta, std::string* err) {
+    if (active_.load()) { *err = "数据采集已在进行中"; return false; }
+    meta_ = meta;
+    meta_.start_time = nowString();
+
+    const double free_gb = diskFreeGb(cfg_.app.data_dir);
+    if (free_gb >= 0 && free_gb < min_free_gb_) {
+        *err = "磁盘剩余空间仅 " + std::to_string(free_gb) +
+               " GB，低于安全阈值 " + std::to_string(min_free_gb_) + " GB，拒绝开始采集";
+        return false;
+    }
+    if (!openFile(err)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(st_mu_);
+        st_ = RecordingStatus{};
+        st_.active = true;
+        st_.file = impl_ ? cur_path_ : "";
+        st_.start_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        st_.disk_free_gb = free_gb;
+    }
+    active_.store(true);
+    return true;
+}
+
+void DataLogger::stop() {
+    if (!active_.load()) return;
+    active_.store(false);
+    // 让 Logger 线程把 ring 里剩下的写完再关文件
+    for (int i = 0; i < 100 && ring_->size() > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    meta_.end_time = nowString();
+    closeFile();
+    std::lock_guard<std::mutex> lk(st_mu_);
+    st_.active = false;
+}
+
+RecordingStatus DataLogger::status() const {
+    std::lock_guard<std::mutex> lk(st_mu_);
+    RecordingStatus s = st_;
+    s.buffer_usage = ring_->usage();
+    s.dropped = ring_->dropped();
+    return s;
+}
+
+bool DataLogger::openFile(std::string* err) {
+    std::error_code ec;
+    fs::create_directories(cfg_.app.data_dir, ec);
+
+    std::string base = meta_.test_name.empty() ? "exp" : meta_.test_name;
+    for (auto& c : base) if (c == '/' || c == ' ') c = '_';
+    cur_path_ = (fs::path(cfg_.app.data_dir) /
+                 (base + "_" + fileStamp() + ".h5")).string();
+
+    impl_->file = H5Fcreate(cur_path_.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+    if (impl_->file < 0) {
+        *err = "无法创建数据文件 " + cur_path_ + "（检查目录权限与磁盘空间）";
+        return false;
+    }
+    impl_->group = H5Gcreate2(impl_->file, "/experiment", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    // ── 写 metadata（任务书第四十九节）──────────────────────────────
+    auto attrStr = [&](const char* k, const std::string& v) {
+        hid_t s = H5Screate(H5S_SCALAR);
+        hid_t t = H5Tcopy(H5T_C_S1);
+        H5Tset_size(t, v.size() + 1);
+        hid_t a = H5Acreate2(impl_->group, k, t, s, H5P_DEFAULT, H5P_DEFAULT);
+        H5Awrite(a, t, v.c_str());
+        H5Aclose(a); H5Tclose(t); H5Sclose(s);
+    };
+    auto attrDbl = [&](const char* k, double v) {
+        hid_t s = H5Screate(H5S_SCALAR);
+        hid_t a = H5Acreate2(impl_->group, k, H5T_NATIVE_DOUBLE, s, H5P_DEFAULT, H5P_DEFAULT);
+        H5Awrite(a, H5T_NATIVE_DOUBLE, &v);
+        H5Aclose(a); H5Sclose(s);
+    };
+
+    attrStr("test_name", meta_.test_name);
+    attrStr("description", meta_.description);
+    attrStr("operation_mode", meta_.operation_mode);
+    attrStr("controller", meta_.controller);
+    attrStr("control_params", meta_.control_params_json);
+    attrStr("slave_name", meta_.slave_name);
+    attrStr("software_version", meta_.software_version);
+    attrStr("start_time", meta_.start_time);
+    attrDbl("cycle_us", meta_.cycle_us);
+    attrDbl("sampling_hz", meta_.sampling_hz);
+    {
+        // 存十六进制字符串而不是 double：追溯时 0x5A65726F 才认得出来，
+        // 1516597871.0 没人能一眼看懂
+        char b[24];
+        snprintf(b, sizeof b, "0x%08X", meta_.vendor_id);
+        attrStr("vendor_id", b);
+        snprintf(b, sizeof b, "0x%08X", meta_.product_code);
+        attrStr("product_code", b);
+    }
+    attrDbl("motor_encoder_counts_per_rev", meta_.motor_counts_per_rev);
+    attrDbl("output_encoder_counts_per_rev", meta_.output_counts_per_rev);
+    attrDbl("gear_ratio", meta_.gear_ratio);
+    attrStr("encoder_resolution_verified",
+            meta_.encoder_resolution_verified ? "true"
+                : "false (输出侧分辨率未经物理转角验证；若实为2^18则所有rpm翻倍)");
+
+    // ── 建列 ───────────────────────────────────────────────────────
+    static const struct { const char* n; hid_t t; } kCols[] = {
+        {"system_time_ns", H5T_NATIVE_INT64},
+        {"elapsed_time_s", H5T_NATIVE_DOUBLE},
+        {"motor_position_raw", H5T_NATIVE_INT32},
+        {"motor_position_unwrapped_deg", H5T_NATIVE_DOUBLE},
+        {"motor_position_deg", H5T_NATIVE_DOUBLE},
+        {"motor_velocity_rpm", H5T_NATIVE_DOUBLE},
+        {"output_position_raw", H5T_NATIVE_INT32},
+        {"output_position_unwrapped_deg", H5T_NATIVE_DOUBLE},
+        {"output_position_deg", H5T_NATIVE_DOUBLE},
+        {"output_velocity_rpm", H5T_NATIVE_DOUBLE},
+        {"motor_current_A", H5T_NATIVE_DOUBLE},
+        {"actual_torque_Nm", H5T_NATIVE_DOUBLE},
+        {"target_position_deg", H5T_NATIVE_DOUBLE},
+        {"target_velocity_rpm", H5T_NATIVE_DOUBLE},
+        {"target_torque_Nm", H5T_NATIVE_DOUBLE},
+        {"position_error_deg", H5T_NATIVE_DOUBLE},
+        {"velocity_error_rpm", H5T_NATIVE_DOUBLE},
+        {"controlword", H5T_NATIVE_UINT16},
+        {"statusword", H5T_NATIVE_UINT16},
+        {"operation_mode", H5T_NATIVE_INT8},
+        {"cia402_state", H5T_NATIVE_UINT8},
+        {"ethercat_state", H5T_NATIVE_UINT8},
+        {"working_counter", H5T_NATIVE_UINT32},
+    };
+
+    impl_->cols.clear();
+    for (const auto& c : kCols) {
+        hsize_t dims[1] = {0}, maxd[1] = {H5S_UNLIMITED}, chunk[1] = {kChunk};
+        hid_t space = H5Screate_simple(1, dims, maxd);
+        hid_t plist = H5Pcreate(H5P_DATASET_CREATE);
+        H5Pset_chunk(plist, 1, chunk);
+        H5Pset_deflate(plist, 4);      // 压缩：10 小时实验从 ~6.6GB 降到 2~3GB
+        hid_t d = H5Dcreate2(impl_->group, c.n, c.t, space, H5P_DEFAULT, plist, H5P_DEFAULT);
+        H5Pclose(plist); H5Sclose(space);
+        if (d < 0) { *err = std::string("创建数据列失败: ") + c.n; return false; }
+        impl_->cols.push_back(Column{c.n, c.t, d, 0});
+    }
+    return true;
+}
+
+void DataLogger::closeFile() {
+    if (!impl_ || impl_->file < 0) return;
+    if (!meta_.end_time.empty() && impl_->group >= 0) {
+        hid_t s = H5Screate(H5S_SCALAR);
+        hid_t t = H5Tcopy(H5T_C_S1);
+        H5Tset_size(t, meta_.end_time.size() + 1);
+        hid_t a = H5Acreate2(impl_->group, "end_time", t, s, H5P_DEFAULT, H5P_DEFAULT);
+        H5Awrite(a, t, meta_.end_time.c_str());
+        H5Aclose(a); H5Tclose(t); H5Sclose(s);
+    }
+    for (auto& c : impl_->cols) if (c.dset >= 0) H5Dclose(c.dset);
+    impl_->cols.clear();
+    if (impl_->group >= 0) { H5Gclose(impl_->group); impl_->group = -1; }
+    H5Fclose(impl_->file);
+    impl_->file = -1;
+}
+
+bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
+    if (impl_->file < 0 || n == 0) return true;
+
+    auto extend = [&](Column& c, const void* data) -> bool {
+        hsize_t newsize[1] = {c.rows + n};
+        if (H5Dset_extent(c.dset, newsize) < 0) return false;
+        hid_t fs = H5Dget_space(c.dset);
+        hsize_t start[1] = {c.rows}, count[1] = {n};
+        H5Sselect_hyperslab(fs, H5S_SELECT_SET, start, nullptr, count, nullptr);
+        hid_t ms = H5Screate_simple(1, count, nullptr);
+        const herr_t r = H5Dwrite(c.dset, c.type, ms, fs, H5P_DEFAULT, data);
+        H5Sclose(ms); H5Sclose(fs);
+        if (r < 0) return false;
+        c.rows += n;
+        return true;
+    };
+
+    size_t k = 0;
+    auto& d  = impl_->scratch;
+    auto& i64 = impl_->scratch_i64;
+    auto& i32 = impl_->scratch_i32;
+    auto& u32 = impl_->scratch_u32;
+    auto& u16 = impl_->scratch_u16;
+    auto& u8  = impl_->scratch_u8;
+
+#define COL_D(expr) { for (size_t i=0;i<n;++i) d[i]  = (expr); if(!extend(impl_->cols[k++], d.data()))   goto fail; }
+#define COL_I64(expr){ for (size_t i=0;i<n;++i) i64[i]= (expr); if(!extend(impl_->cols[k++], i64.data())) goto fail; }
+#define COL_I32(expr){ for (size_t i=0;i<n;++i) i32[i]= (expr); if(!extend(impl_->cols[k++], i32.data())) goto fail; }
+#define COL_U32(expr){ for (size_t i=0;i<n;++i) u32[i]= (expr); if(!extend(impl_->cols[k++], u32.data())) goto fail; }
+#define COL_U16(expr){ for (size_t i=0;i<n;++i) u16[i]= (expr); if(!extend(impl_->cols[k++], u16.data())) goto fail; }
+#define COL_U8(expr) { for (size_t i=0;i<n;++i) u8[i] = (expr); if(!extend(impl_->cols[k++], u8.data()))  goto fail; }
+
+    COL_I64(s[i].system_time_ns)
+    COL_D  (s[i].elapsed_time_s)
+    COL_I32(s[i].motor_position_raw)
+    COL_D  (s[i].motor_position_unwrapped_deg)
+    COL_D  (s[i].motor_position_deg)
+    COL_D  (s[i].motor_velocity_rpm)
+    COL_I32(s[i].output_position_raw)
+    COL_D  (s[i].output_position_unwrapped_deg)
+    COL_D  (s[i].output_position_deg)
+    COL_D  (s[i].output_velocity_rpm)
+    COL_D  (s[i].motor_current_A)
+    COL_D  (s[i].actual_torque_Nm)
+    COL_D  (s[i].target_position_deg)
+    COL_D  (s[i].target_velocity_rpm)
+    COL_D  (s[i].target_torque_Nm)
+    COL_D  (s[i].position_error_deg)
+    COL_D  (s[i].velocity_error_rpm)
+    COL_U16(s[i].controlword)
+    COL_U16(s[i].statusword)
+    COL_U8 (static_cast<uint8_t>(s[i].operation_mode))
+    COL_U8 (s[i].cia402_state)
+    COL_U8 (s[i].ethercat_state)
+    COL_U32(s[i].working_counter)
+
+#undef COL_D
+#undef COL_I64
+#undef COL_I32
+#undef COL_U32
+#undef COL_U16
+#undef COL_U8
+    return true;
+
+fail:
+    *err = "写 HDF5 失败（磁盘满或文件损坏），已停止采集";
+    return false;
+}
+
+void DataLogger::threadMain() {
+    auto last_flush = std::chrono::steady_clock::now();
+
+    while (!quit_.load()) {
+        if (!active_.load()) {
+            // 不采集时也要把 ring 排空，否则 RT 侧会一直计 dropped
+            Sample tmp;
+            while (ring_->pop(&tmp)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        const size_t n = ring_->popBatch(impl_->batch.data(), kBatch);
+        if (n == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } else {
+            std::string err;
+            if (!writeBatch(impl_->batch.data(), n, &err)) {
+                active_.store(false);
+                std::lock_guard<std::mutex> lk(st_mu_);
+                st_.active = false;
+                continue;
+            }
+            std::lock_guard<std::mutex> lk(st_mu_);
+            st_.samples += n;
+            st_.elapsed_s = st_.samples / (meta_.sampling_hz > 0 ? meta_.sampling_hz : 1000.0);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_flush > std::chrono::seconds(30)) {
+            // 30 秒一次 flush：兼顾崩溃鲁棒性与写放大。
+            // 不每批 flush —— 那会让 10 小时实验的磁盘 IO 翻好几倍。
+            if (impl_->file >= 0) H5Fflush(impl_->file, H5F_SCOPE_GLOBAL);
+            last_flush = now;
+
+            std::lock_guard<std::mutex> lk(st_mu_);
+            st_.disk_free_gb = diskFreeGb(cfg_.app.data_dir);
+            std::error_code ec;
+            st_.bytes = fs::exists(cur_path_) ? fs::file_size(cur_path_, ec) : 0;
+            if (st_.disk_free_gb >= 0 && st_.disk_free_gb < min_free_gb_) {
+                active_.store(false);
+                st_.active = false;
+            }
+        }
+    }
+}
+
+}  // namespace ecjc

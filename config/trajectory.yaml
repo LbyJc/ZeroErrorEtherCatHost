@@ -1,0 +1,45 @@
+# 轨迹发生器默认值。GUI 里可在线改，这里只是打开软件时的初值。
+trajectory:
+  default_type: constant
+
+  constant:
+    csp_deg: 30.0
+    csv_rpm: 100.0             # 电机侧 100 rpm，对应 0x60FF ≈ 7207
+    cst_Nm: 2.0
+
+  sine:
+    offset: 0.0
+    amplitude: 10.0
+    frequency_hz: 0.5
+    phase_deg: 0.0
+    duration_s: 20.0
+
+  ramp:
+    initial: 0.0
+    final: 100.0
+    duration_s: 5.0
+
+  triangle:
+    offset: 0.0
+    amplitude: 10.0
+    frequency_hz: 0.2
+
+  trapezoidal:                 # 仅用于位置轨迹
+    target_position_deg: 90.0
+    max_velocity_rpm: 50.0
+    acceleration: 200.0        # deg/s^2
+    deceleration: 200.0
+
+  csv_file:
+    path: ""
+    # 支持两种列格式：
+    #   time,target
+    #   time,target_position,target_velocity,target_torque
+    # Run 之前一次性读入内存，RT 线程内只做二分查找 + 线性插值
+    loop: false
+
+  # 停止运行时的软停参数（任务书第二十一节）
+  stop_ramp:
+    csv_decel_rpm_per_s: 200.0
+    cst_decel_Nm_per_s: 5.0
+    csp_hold_position: true     # CSP 停止 = 保持当前位置

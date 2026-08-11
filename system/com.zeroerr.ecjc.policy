@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>EtherCAT Joint Control</vendor>
+
+  <!--
+    只授权 ecjc-helper 这一个动作，且 helper 内部是白名单式的子命令。
+    auth_admin_keep：管理员认证一次后在会话内保持一段时间，
+    这样一次实验里反复启停主站不会被反复打断，同时**不保存任何密码**。
+    若希望每次都确认，改成 auth_admin。
+  -->
+  <action id="com.zeroerr.ecjc.manage">
+    <description>Manage EtherCAT Joint Control backend and master</description>
+    <description xml:lang="zh_CN">管理 EtherCAT 关节控制后端与主站</description>
+    <message>需要授权以启动或停止 EtherCAT 主站与实时后端</message>
+    <message xml:lang="zh_CN">需要授权以启动或停止 EtherCAT 主站与实时后端</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/ethercat-joint-control/bin/ecjc-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
