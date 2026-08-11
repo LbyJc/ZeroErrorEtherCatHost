@@ -60,3 +60,30 @@ TEST(csp_stop_explicit_hold_run_start_honored_within_jump_threshold) {
     CHECK(!guard.triggered);
     CHECK_NEAR(guard.safe_target_deg, 10.0, 1e-9);   // 这次是真的保持了 Run 起始位置
 }
+
+// ── 撤使能安全门限：isSafeToDisableAt ────────────────────────────────────
+// 依据手册 §7.1：制动器只许在 <10% 最大转速（输出最大 25 rpm）下承受动态制动。
+
+// 撤使能的安全门限：输出侧转速必须降到 2.5 rpm 以下。
+TEST(safe_to_disable_requires_output_speed_below_2p5_rpm) {
+    CHECK(!isSafeToDisableAt(10.5, /*stopping=*/true));   // 摆臂峰值，绝不允许
+    CHECK(!isSafeToDisableAt(2.6,  /*stopping=*/true));
+    CHECK( isSafeToDisableAt(2.4,  /*stopping=*/false));
+    CHECK( isSafeToDisableAt(0.0,  /*stopping=*/false));
+}
+
+// 斜坡还没走完（stopping 仍为真）时，即使转速已经很低也要等斜坡置位完成
+TEST(safe_to_disable_waits_for_ramp_completion) {
+    CHECK(!isSafeToDisableAt(0.5, /*stopping=*/true));
+}
+
+// ── 撤使能门控的超时兜底：realtime_task.cpp 里"等太久就强制撤使能"这条
+//    安全分支必须能脱离 RT 循环单独测试（上一轮评审因内联未测被打回）。
+TEST(disable_wait_not_timed_out_within_limit) {
+    CHECK(!disableWaitTimedOut(0,     15000));
+    CHECK(!disableWaitTimedOut(15000, 15000));   // 恰好等于上限，尚未超出
+}
+
+TEST(disable_wait_times_out_beyond_limit) {
+    CHECK(disableWaitTimedOut(15001, 15000));
+}

@@ -250,6 +250,8 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
             o->stop_ramp.csv_decel_rpm_per_s = get<double>(s, "csv_decel_rpm_per_s", 200.0);
             o->stop_ramp.cst_decel_Nm_per_s  = get<double>(s, "cst_decel_Nm_per_s", 5.0);
             o->stop_ramp.csp_hold_position   = get<bool>(s, "csp_hold_position", true);
+            o->stop_ramp.disable_timeout_cycles =
+                static_cast<uint64_t>(get<double>(s, "disable_timeout_cycles", 15000.0));
         }
     }
 

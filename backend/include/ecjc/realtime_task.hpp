@@ -37,6 +37,7 @@ struct StatusSnapshot {
     OpMode     mode_selected = OpMode::CSV;
     bool       running = false;
     bool       mode_matched = false;
+    bool       stopping = false;      ///< 软停斜坡是否仍在进行中（供 main.cpp 停主站序列等待）
     RtStats    stats;
     JointState joint;
     Setpoint   ref;
@@ -144,6 +145,7 @@ private:
     AppState app_state_ = AppState::Disconnected;
     bool     mode_matched_ = false;
     double   hold_position_deg_ = 0;
+    uint64_t disable_wait_cycles_ = 0;
 
     SpscRing<Sample> log_ring_, gui_ring_;
 

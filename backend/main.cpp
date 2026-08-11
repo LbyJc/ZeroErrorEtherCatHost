@@ -161,9 +161,16 @@ int main(int argc, char** argv) {
     auto disconnect = [&](std::string* e) -> bool {
         (void)e;
         rt.stopRun();
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));   // 等软停斜坡走完
+        // 等软停真正走完，而不是拍一个固定的 300ms。
+        // 按 csv_decel_rpm_per_s=200，从 3000 电机 rpm 减到零需 15 s。
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto st = rt.snapshot();
+            if (isSafeToDisableAt(st.joint.output_vel_rpm, st.stopping)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
         rt.servoDisable();
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));  // 手册：制动器动作约 150ms
         rt.requestStop();
         rt.join();
         rt.setBusActive(false);      // RT 已退出，明确交回总线所有权

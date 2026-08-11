@@ -68,3 +68,15 @@ startup_sdo:
       （0x3B68 = 0xFF00），实测一开跑就报、且清了又来。
       取硬窗口 0x3B60(=35000 counts/s) 的 10%，约合电机侧 48 rpm 的容限，
       远低于硬保护阈值。2026-08-10 真机验证：设置后跑 100 rpm 全程无警告。
+
+  - index: 0x605A
+    sub: 0
+    type: i16
+    value: 2
+    name: "Quick stop option code"
+    comment: >
+      2 = 按 quick stop deceleration 减速后进入 Switch On Disabled。
+      不设置时快停行为取决于驱动器 NVM 里碰巧存了什么值——这正是本工程
+      在 slave.yaml 开头反对的那种依赖。
+      手册 §7.1：制动器只许在 <2.5 rpm（输出侧）下承受动态制动，
+      而摆臂峰值 10.5 rpm，快停必须是受控减速而不是切电。

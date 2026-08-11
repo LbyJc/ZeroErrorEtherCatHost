@@ -207,7 +207,27 @@ void RealtimeTask::cycle(int64_t now_ns) {
 
     if (fault_reset_req_.exchange(false, std::memory_order_acq_rel))
         cia_.requestFaultReset(20);
-    cia_.setTarget(static_cast<Cia402Target>(desired_target_.load(std::memory_order_relaxed)));
+
+    // 撤使能类目标必须等软停真正完成。否则控制字下一拍就切电，
+    // 而斜坡还在数——手册 §7.1：>2.5 rpm 抱闸会永久损坏运动组件。
+    {
+        const auto want = static_cast<Cia402Target>(desired_target_.load(std::memory_order_relaxed));
+        const bool is_disable = (want == Cia402Target::DisableVoltage);
+        if (is_disable && !isSafeToDisableAt(joint_.output_vel_rpm,
+                                             stopping_.load(std::memory_order_relaxed))) {
+            cia_.setTarget(Cia402Target::EnableOperation);   // 维持使能，让斜坡把速度压下来
+            ++disable_wait_cycles_;
+            if (disableWaitTimedOut(disable_wait_cycles_, cfg_.stop_ramp.disable_timeout_cycles)) {
+                cia_.setTarget(want);                        // 超时兜底，避免永远停不下来
+                snprintf(snap_.last_error, sizeof snap_.last_error,
+                         "软停超时（%llu 拍），强制撤使能，转速 %.2f rpm",
+                         (unsigned long long)disable_wait_cycles_, joint_.output_vel_rpm);
+            }
+        } else {
+            disable_wait_cycles_ = 0;
+            cia_.setTarget(want);
+        }
+    }
     const uint16_t cw_out = cia_.update(raw_.statusword);
     const Cia402State cia_state = cia_.state();
 
@@ -396,6 +416,7 @@ void RealtimeTask::cycle(int64_t now_ns) {
     snap_.mode_selected = want_mode;
     snap_.running = running;
     snap_.mode_matched = mode_matched_;
+    snap_.stopping = stopping_.load(std::memory_order_relaxed);
     snap_.stats = stats_;
     snap_.joint = joint_;
     snap_.ref = ref_;

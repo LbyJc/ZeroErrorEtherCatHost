@@ -49,3 +49,4 @@ trajectory:
                                 # scaling.limits.csp_target_jump_deg_max（默认 5°）时才
                                 # 被履行：超过阈值会被位置阶跃兜底钳回当前实测位置并强制
                                 # 软停，不再是"Run 起始位置"（失效到安全侧）。
+    disable_timeout_cycles: 15000   # 软停等待上限。1 kHz 下 15 s，够从 3000 电机 rpm 按 200 rpm/s 减到零

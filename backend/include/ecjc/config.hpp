@@ -2,6 +2,7 @@
 // 任务书第三十五节：转换系数统一放配置文件，不要散落在代码里。
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -100,6 +101,7 @@ struct StopRampCfg {
                                         // 超过阈值，realtime_task.cpp 里的 CSP 位置阶跃兜底
                                         // 会在下一拍把它钳回当前实测位置并强制软停
                                         // （失效到安全侧，但不再是"Run 起始位置"）。
+    uint64_t disable_timeout_cycles = 15000;   ///< 软停等待上限。1 kHz 下 15 s
 };
 
 /// CSP 停止时应下发的目标位置。
@@ -107,6 +109,21 @@ struct StopRampCfg {
 /// current_deg = 当前实测位置
 inline double cspStopTarget(const StopRampCfg& cfg, double hold_deg, double current_deg) {
     return cfg.csp_hold_position ? hold_deg : current_deg;
+}
+
+/// 撤使能安全门限。手册 §7.1：制动器只许在 <10% 最大转速下承受动态制动，
+/// eRob80H120 输出端最大 25 rpm ⇒ 门限 2.5 rpm。
+constexpr double kSafeDisableOutputRpm = 2.5;
+
+inline bool isSafeToDisableAt(double output_rpm, bool stopping) {
+    return !stopping && std::fabs(output_rpm) < kSafeDisableOutputRpm;
+}
+
+/// 撤使能门控的超时兜底判定：等待软停走完超过 disable_timeout_cycles 拍后，
+/// 即使转速仍未压到安全门限也强制放行撤使能，避免速度传感异常等极端情况下
+/// 进程永远卡在"等软停"、连退出都退不出去（失效到"允许"而不是"永久悬挂"）。
+inline bool disableWaitTimedOut(uint64_t wait_cycles, uint64_t timeout_cycles) {
+    return wait_cycles > timeout_cycles;
 }
 
 struct ControllerCfg {
