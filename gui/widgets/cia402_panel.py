@@ -112,14 +112,19 @@ class Cia402Panel(QWidget):
     # ── 动作 ────────────────────────────────────────────────────────────
     def _on_servo_disable(self):
         if self._running:
+            # 终审 finding I6：Task 3 之后 servo_disable 与 safe_stop 走的是
+            # 同一条被门控的路径（realtime_task.cpp 里撤使能必须等软停到
+            # 2.5rpm 以下才真正切电），对话框里已经不存在"直接撤使能会在高速
+            # 下抱闸"这个选项了——旧文案在吓唬一个已经不存在的危险，操作员
+            # 会用警告是否真实来校准对系统的信任，文案必须如实描述现在的行为。
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle("正在运行中")
-            box.setText("关节正在运行。直接撤使能会在高速下抱闸。")
+            box.setText("关节正在运行。")
             box.setInformativeText(
-                "手册 §7.1：制动器只许在 2.5 rpm（输出侧）以下承受动态制动，"
-                "高转速下触发会对运动组件造成永久性损坏。\n\n"
-                "建议改用【安全停机】：先软停到 2.5 rpm 以下再撤使能。")
+                "撤使能会先软停至 2.5 rpm 以下再切电（最长约 15 秒），"
+                "这段时间内伺服仍保持使能。\n\n"
+                "确认继续？")
             safe = box.addButton("安全停机", QMessageBox.AcceptRole)
             box.addButton("取消", QMessageBox.RejectRole)
             box.exec()
