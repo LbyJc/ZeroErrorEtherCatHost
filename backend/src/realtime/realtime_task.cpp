@@ -312,15 +312,21 @@ void RealtimeTask::cycle(int64_t now_ns) {
                     (cfg_.scaling.rated_torque_mNm / 1000.0) / cfg_.scaling.torque_scale));
     // 兜底：CSP 下驱动器不做 profile 限制，目标与实测差得太远就是一次位置阶跃。
     // 宁可拒绝下发并报错，也不要让它冲过去。
+    // 注意：这条判定对 want_mode==CSP 恒生效，不只是停止瞬态——所以
+    // stop_ramp.csp_hold_position=true（显式要求保持"Run 起始位置"）只在该位置与
+    // 当前实测偏差 ≤ csp_target_jump_deg_max 时才会被真正履行，超过阈值会在下一拍
+    // 被这里钳回当前实测位置并强制软停（失效到安全侧，但配置的字面语义不再可靠）。
     if (want_mode == OpMode::CSP) {
-        const double err_deg = out_.target_pos_deg - joint_.output_pos_unwrapped_deg;
-        if (std::fabs(err_deg) > cfg_.scaling.csp_target_jump_deg_max) {
-            out_.target_pos_deg = joint_.output_pos_unwrapped_deg;
+        const auto guard = cspTargetJumpGuard(out_.target_pos_deg,
+                                               joint_.output_pos_unwrapped_deg,
+                                               cfg_.scaling.csp_target_jump_deg_max);
+        out_.target_pos_deg = guard.safe_target_deg;
+        if (guard.triggered) {
             stopping_.store(true, std::memory_order_relaxed);
             run_req_.store(false, std::memory_order_relaxed);
             snprintf(snap_.last_error, sizeof snap_.last_error,
                      "CSP 目标位置阶跃 %.3f° 超过上限 %.3f°，已拒绝下发并软停",
-                     err_deg, cfg_.scaling.csp_target_jump_deg_max);
+                     std::fabs(guard.err_deg), cfg_.scaling.csp_target_jump_deg_max);
         }
     }
     switch (want_mode) {

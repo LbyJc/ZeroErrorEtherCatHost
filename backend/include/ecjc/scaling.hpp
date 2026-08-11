@@ -8,6 +8,7 @@
 // 所以位置/速度的换算基准是输出侧编码器，电机侧数值由减速比换算得到。
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include "ecjc/types.hpp"
 
@@ -44,6 +45,30 @@ struct ScalingConfig {
     double current_A_max           = 6.3;
     double csp_target_jump_deg_max = 5.0;   ///< CSP 目标与实测的最大允许偏差
 };
+
+/// CSP 目标位置阶跃兜底的判定结果。
+struct CspJumpGuardResult {
+    double safe_target_deg;   ///< 应下发的目标：未触发 = 原样放行，触发 = 钳到 current_deg
+    bool   triggered = false; ///< 是否因超过阈值而钳位
+    double err_deg = 0.0;     ///< target_deg - current_deg，带符号，供报错文本取 fabs 用
+};
+
+/// 判定 CSP 目标位置相对当前实测位置是否构成一次危险的位置阶跃。
+/// CSP 下驱动器不做 profile 限制（0x6081/0x6083 不生效），偏差超过 max_jump_deg
+/// 时必须拒绝把原目标下发给驱动器，改发当前实测位置。
+inline CspJumpGuardResult cspTargetJumpGuard(double target_deg, double current_deg,
+                                              double max_jump_deg) {
+    CspJumpGuardResult r;
+    r.err_deg = target_deg - current_deg;
+    if (std::fabs(r.err_deg) > max_jump_deg) {
+        r.safe_target_deg = current_deg;
+        r.triggered = true;
+    } else {
+        r.safe_target_deg = target_deg;
+        r.triggered = false;
+    }
+    return r;
+}
 
 /// 多圈展开器。
 ///

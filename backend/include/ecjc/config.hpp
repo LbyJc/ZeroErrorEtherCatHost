@@ -94,8 +94,12 @@ struct StopRampCfg {
     double csv_decel_rpm_per_s = 200.0;
     double cst_decel_Nm_per_s = 5.0;
     bool   csp_hold_position = false;   // CSP 停止 = 保持"当前实测位置"。
-                                        // 置 true 会保持"本次 Run 开始时"的位置，
-                                        // 那是一次位置阶跃，CSP 下驱动器不做 profile 限制。
+                                        // 置 true 会保持"本次 Run 开始时"的位置——但这个承诺
+                                        // 只在该位置与当前实测偏差 ≤ scaling.limits.
+                                        // csp_target_jump_deg_max（默认 5°）时才被履行：
+                                        // 超过阈值，realtime_task.cpp 里的 CSP 位置阶跃兜底
+                                        // 会在下一拍把它钳回当前实测位置并强制软停
+                                        // （失效到安全侧，但不再是"Run 起始位置"）。
 };
 
 /// CSP 停止时应下发的目标位置。

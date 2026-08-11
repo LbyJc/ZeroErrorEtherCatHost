@@ -124,6 +124,30 @@ TEST(PDO到物理量_全链路) {
     CHECK_NEAR(j.torque_Nm, 1.24, 1e-6);
 }
 
+// CSP 位置阶跃兜底：偏差在阈值内原样放行，不触发。
+TEST(csp阶跃兜底_阈值内不动作) {
+    const auto r = cspTargetJumpGuard(/*target=*/93.0, /*current=*/90.0, /*max=*/5.0);
+    CHECK(!r.triggered);
+    CHECK_NEAR(r.safe_target_deg, 93.0, 1e-9);
+    CHECK_NEAR(r.err_deg, 3.0, 1e-9);
+}
+
+// 偏差超过阈值：必须钳到当前实测位置，绝不能把原目标放行下去。
+TEST(csp阶跃兜底_超阈值钳到实测位置) {
+    const auto r = cspTargetJumpGuard(/*target=*/170.0, /*current=*/90.0, /*max=*/5.0);
+    CHECK(r.triggered);
+    CHECK_NEAR(r.safe_target_deg, 90.0, 1e-9);   // 钳到 current，不是 target
+    CHECK_NEAR(r.err_deg, 80.0, 1e-9);
+}
+
+// 负方向偏差同样要按幅值判断，不能只查符号。
+TEST(csp阶跃兜底_负方向偏差按幅值判断) {
+    const auto r = cspTargetJumpGuard(/*target=*/10.0, /*current=*/90.0, /*max=*/5.0);
+    CHECK(r.triggered);
+    CHECK_NEAR(r.safe_target_deg, 90.0, 1e-9);
+    CHECK_NEAR(r.err_deg, -80.0, 1e-9);
+}
+
 TEST(方向取反) {
     ScalingConfig c = realCfg();
     c.velocity_direction = -1;
