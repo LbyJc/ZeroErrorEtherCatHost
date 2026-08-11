@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -179,6 +180,50 @@ private:
     std::map<std::string, std::string> kv_;
 };
 
+// ── 帧发送：一次 sendmsg 尽量发完一个逻辑帧（帧头 + payload） ─────────────
+// 用 iovec 把两段合成一次系统调用视角上的"一个帧"，这样"已经发出去多少字节"
+// 只需要在一个循环里统一跟踪，不用在帧头、payload 两段代码里各自处理部分写、
+// 各自读 errno——那正是之前版本的 bug 根源：帧头那段没先判断 n<0 就读 errno，
+// 且帧头/payload 各自独立判断"是不是超时"，没人知道"这一帧总共有没有发出去过
+// 至少一个字节"。
+enum class FrameSendResult {
+    Ok,         ///< 整帧发完
+    SlowDrop,   ///< 一个字节都没发出去就超时（EAGAIN/EWOULDBLOCK）：可以安全丢这一帧，不断连
+    HardFail,   ///< 一个字节都没发出去，但不是超时（比如对端已经关闭）：真错误，交给 serveClient 的 read() 侧收尾
+    Torn,       ///< 已经发出去至少一个字节之后才失败：协议流被撕裂了一半，必须断连，不能只丢帧
+};
+
+FrameSendResult sendIovecFully(int fd, struct iovec* iov, int iovcnt) {
+    size_t sent = 0;
+    while (iovcnt > 0) {
+        struct msghdr msg{};
+        msg.msg_iov = iov;
+        msg.msg_iovlen = iovcnt;
+        // MSG_NOSIGNAL：客户端突然消失时不要给我们一个 SIGPIPE 把进程干掉
+        const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
+        if (n < 0) {
+            const bool would_block = (errno == EAGAIN || errno == EWOULDBLOCK);
+            if (sent == 0) return would_block ? FrameSendResult::SlowDrop : FrameSendResult::HardFail;
+            return FrameSendResult::Torn;   // 之前已经发出去过字节：不管这次为什么失败，流都已经撕裂
+        }
+        if (n == 0) return sent == 0 ? FrameSendResult::HardFail : FrameSendResult::Torn;  // 防御性分支
+        sent += static_cast<size_t>(n);
+        size_t remaining = static_cast<size_t>(n);
+        while (remaining > 0 && iovcnt > 0) {
+            if (remaining < iov->iov_len) {
+                iov->iov_base = static_cast<char*>(iov->iov_base) + remaining;
+                iov->iov_len -= remaining;
+                remaining = 0;
+            } else {
+                remaining -= iov->iov_len;
+                ++iov;
+                --iovcnt;
+            }
+        }
+    }
+    return FrameSendResult::Ok;
+}
+
 }  // namespace
 
 IpcServer::IpcServer(const FullConfig& cfg, RealtimeTask* rt, DataLogger* logger)
@@ -282,8 +327,10 @@ void IpcServer::threadMain() {
                     "\"msg\":\"客户端数量已达上限，拒绝连接\"}";
                 sendFrameTo(fd, static_cast<uint16_t>(FrameType::Json),
                             msg.data(), msg.size());
+                // 这个 fd 从没进过 clients_，下面统一 close；顺手清一下记账表，
+                // 防御性的（这个 fd 理论上不可能在表里留下条目，但清了无害）。
                 ::close(fd);
-                { std::lock_guard<std::mutex> wl(warn_mu_); json_drop_warned_.erase(fd); }
+                forgetClient(fd);
                 continue;
             }
             clients_.push_back(fd);
@@ -294,6 +341,21 @@ void IpcServer::threadMain() {
         const std::string st = statusJson(), pa = paramsJson();
         sendFrameTo(fd, static_cast<uint16_t>(FrameType::Json), st.data(), st.size());
         sendFrameTo(fd, static_cast<uint16_t>(FrameType::Json), pa.data(), pa.size());
+
+        // 上面两次发送如果撞上协议撕裂或者长期发送失败，sendFrameTo 内部已经
+        // 通过 evictClient() 把这个 fd 从 clients_ 摘掉并 shutdown 了——但此时
+        // 还没有 serveClient 线程为它兜底 close()，得由 accept 线程自己收尾，
+        // 且绝不能再为它起一个读线程（会在一个已经 shutdown 的 fd 上空转）。
+        bool alive = false;
+        {
+            std::lock_guard<std::mutex> lk(clients_mu_);
+            for (int c : clients_) { if (c == fd) { alive = true; break; } }
+        }
+        if (!alive) {
+            ::close(fd);
+            forgetClient(fd);
+            continue;
+        }
 
         // 每个客户端一个线程。清理在 stop() 里统一 join。
         {
@@ -321,6 +383,12 @@ void IpcServer::serveClient(int fd) {
 }
 
 void IpcServer::dropClient(int fd) {
+    // fd 的唯一一次 close() 在这里。这个函数只会被 fd 自己的 serveClient 线程
+    // 调用（它的读循环退出之后）——即使 evictClient() 已经从另一个线程把这个
+    // fd 从 clients_ 里摘掉过（协议撕裂 / 长期发送失败踢出），close() 的所有权
+    // 仍然在这里：evictClient() 只 shutdown()，不 close()，就是为了避免两个
+    // 线程对同一个 fd 各 close 一次——万一中间被新 accept() 复用了同一个数字，
+    // 二次 close 会误关一个完全不相干的新连接。
     bool last = false;
     {
         std::lock_guard<std::mutex> lk(clients_mu_);
@@ -329,12 +397,7 @@ void IpcServer::dropClient(int fd) {
         }
         last = clients_.empty();
     }
-    {
-        // fd 会被后续 accept() 复用；不清掉的话，新连接可能"继承"到旧连接
-        // 已经记过日志的状态，导致它真正第一次丢帧时反而不记日志了。
-        std::lock_guard<std::mutex> lk(warn_mu_);
-        json_drop_warned_.erase(fd);
-    }
+    forgetClient(fd);
     ::close(fd);
 
     // 只有**最后一个**客户端断开才算"失去操作者"。
@@ -345,52 +408,98 @@ void IpcServer::dropClient(int fd) {
     }
 }
 
+void IpcServer::evictClient(int fd) {
+    // 只摘列表 + shutdown()，不 close()——fd 的所有权在拥有它的 serveClient
+    // 线程手里。shutdown(SHUT_RDWR) 会让那个线程里阻塞/将来的 read() 立刻
+    // 返回 0，走到它自己的 dropClient(fd) 去做真正的 close()（这与 stop() 里
+    // 唤醒所有客户端线程用的是同一个模式，见 stop() 的注释）。
+    // 如果这个 fd 还没有 serveClient 线程（accept 阶段的首次单发就撞上问题），
+    // 调用方（threadMain）负责检测"不在 clients_ 里了"并自己收尾 close()。
+    {
+        std::lock_guard<std::mutex> lk(clients_mu_);
+        for (size_t i = 0; i < clients_.size(); ++i) {
+            if (clients_[i] == fd) { clients_.erase(clients_.begin() + i); break; }
+        }
+    }
+    ::shutdown(fd, SHUT_RDWR);
+}
+
+void IpcServer::forgetClient(int fd) {
+    // fd 会被后续 accept() 复用；不清掉的话，新连接可能"继承"到旧连接的丢帧史，
+    // 导致它真正第一次丢帧时反而不记日志，或者刚连上就因为"计数已经很高"被误踢。
+    std::lock_guard<std::mutex> lk(slow_client_mu_);
+    per_client_drops_.erase(fd);
+}
+
 void IpcServer::sendFrameTo(int fd, uint16_t type, const void* payload, size_t len) {
     if (fd < 0) return;
     FrameHeader h{kFrameMagic, type, kProtocolVersion, static_cast<uint32_t>(len)};
 
+    struct iovec iov[2];
+    iov[0].iov_base = &h;
+    iov[0].iov_len  = sizeof h;
+    int iovcnt = 1;
+    if (len > 0) {
+        iov[1].iov_base = const_cast<void*>(payload);
+        iov[1].iov_len  = len;
+        iovcnt = 2;
+    }
+
     // 该 fd 在 accept 后已被设了 SO_SNDTIMEO=200ms（见 threadMain），
-    // 所以下面这些 ::send 最坏情况阻塞 200ms 就会带着 EAGAIN/EWOULDBLOCK 返回，
-    // 不会无限阻塞——不管是被这个 send_mu_ 锁住的其它线程，还是 accept 线程本身。
-    bool slow = false;
+    // 所以最坏情况阻塞 200ms 就会带着 EAGAIN/EWOULDBLOCK 返回，不会无限阻塞——
+    // 不管是被这个 send_mu_ 锁住的其它线程，还是 accept 线程本身。
+    FrameSendResult r;
     {
         // send_mu_ 保证一帧不会被另一个线程的帧插进来切碎
         std::lock_guard<std::mutex> lk(send_mu_);
-        // MSG_NOSIGNAL：客户端突然消失时不要给我们一个 SIGPIPE 把进程干掉
-        if (::send(fd, &h, sizeof h, MSG_NOSIGNAL) != static_cast<ssize_t>(sizeof h)) {
-            slow = (errno == EAGAIN || errno == EWOULDBLOCK);
-        } else {
-            size_t off = 0;
-            const char* p = static_cast<const char*>(payload);
-            while (off < len) {
-                const ssize_t n = ::send(fd, p + off, len - off, MSG_NOSIGNAL);
-                if (n <= 0) {
-                    slow = (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
-                    break;
-                }
-                off += static_cast<size_t>(n);
-            }
-        }
-    }  // send_mu_ 在这里释放——下面可能调用 log()，它自己也要发帧，绝不能在持锁时调用
+        r = sendIovecFully(fd, iov, iovcnt);
+    }  // send_mu_ 在这里释放——下面可能调用 log()/evictClient()，它们自己也要
+       // 发帧/操作 clients_，绝不能在持锁时调用
 
-    if (!slow) return;
+    if (r == FrameSendResult::Ok) return;
+    if (r == FrameSendResult::HardFail) return;   // 真错误，交给 serveClient 的 read() 侧收尾
 
+    if (r == FrameSendResult::Torn) {
+        // 帧发到一半才失败：接收侧是纯长度前缀流，没有重同步能力，这条连接的
+        // 协议流已经不可恢复地失步了——必须断开，不能只丢这一帧，否则后续帧的
+        // 头会被当成上一帧没发完的 payload 解析，永久错位（见头文件里的说明）。
+        log("WARNING", "客户端读取过慢，帧发送到一半超时/失败，协议流已撕裂，主动断开该连接，fd=" +
+                        std::to_string(fd));
+        evictClient(fd);
+        return;
+    }
+
+    // r == SlowDrop：一个字节都没发出去就超时，帧边界干净，可以安全丢这一帧。
     const uint64_t total = ++slow_client_drops_;
+
+    uint32_t fd_drops = 0;
+    {
+        std::lock_guard<std::mutex> lk(slow_client_mu_);
+        fd_drops = ++per_client_drops_[fd];
+    }
+
     if (type == static_cast<uint16_t>(FrameType::Json)) {
         // JSON 帧＝命令应答/状态/日志/参数表。丢它比丢一帧遥测严重得多：
-        // 客户端会以为自己的命令没有响应。每个连接只记一次，避免慢客户端刷屏日志。
-        bool first_for_this_fd = false;
-        {
-            std::lock_guard<std::mutex> lk(warn_mu_);
-            first_for_this_fd = json_drop_warned_.insert(fd).second;
-        }
-        if (first_for_this_fd) {
+        // 客户端会以为自己的命令没有响应。每个连接只在第一次丢帧时记日志，
+        // 避免慢客户端刷屏日志。
+        if (fd_drops == 1) {
             log("WARNING", "客户端读取过慢，控制帧（应答/状态/日志）被丢弃，该客户端可能收不到命令响应，fd=" +
                             std::to_string(fd));
         }
     } else if (total % 100 == 1) {
-        // 遥测帧：高频、允许偶尔丢，按 100 取模记日志，避免刷屏。
-        log("WARNING", "客户端读取过慢，已丢弃 " + std::to_string(total) + " 帧");
+        // 遥测帧：高频、允许偶尔丢，按全局累计数取模记日志，避免刷屏；
+        // total 是跨所有连接的总数，多个慢客户端同时存在时，靠这里的 fd 定位是谁。
+        log("WARNING", "客户端读取过慢，已丢弃 " + std::to_string(total) + " 帧，fd=" +
+                        std::to_string(fd));
+    }
+
+    if (fd_drops >= kSlowClientEvictAfterDrops) {
+        // 一直卡在帧边界、从没触发过上面的 Torn 分支，说明这条连接长期发不出去
+        // 数据——不主动踢的话它会永久占着连接名额，且每次广播都要在它身上等满
+        // 200ms 才能轮到下一个客户端。300 次×最多 200ms ≈ 累计 60s 之后判定放弃。
+        log("WARNING", "客户端长期无法发送（累计丢帧 " + std::to_string(fd_drops) +
+                        " 次），判定为长期失联，主动断开，fd=" + std::to_string(fd));
+        evictClient(fd);
     }
 }
 

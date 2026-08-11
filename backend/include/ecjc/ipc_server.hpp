@@ -14,7 +14,7 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 #include "ecjc/config.hpp"
@@ -55,6 +55,8 @@ private:
     void sendFrame(uint16_t type, const void* payload, size_t len);
     void sendFrameTo(int fd, uint16_t type, const void* payload, size_t len);
     void dropClient(int fd);
+    void evictClient(int fd);          ///< 摘出 clients_ 并 shutdown()；close() 仍由拥有者线程经 dropClient() 做
+    void forgetClient(int fd);         ///< 清掉 per_client_drops_ 里这个 fd 的记账
     std::string statusJson();
     std::string paramsJson();
     std::string recordingJson();
@@ -78,14 +80,33 @@ private:
     std::atomic<bool> quit_{false};
     std::mutex send_mu_;
 
-    // 慢客户端丢帧：::send 设了 SO_SNDTIMEO，超时即丢这一帧而不是拖死
-    // telemetry/accept 线程（见 sendFrameTo）。总数用于诊断"GUI 曾经冻结过"，
-    // 也透出到 statusJson()。json_drop_warned_ 记录哪些 fd 已经因为丢失
-    // JSON 帧（应答/状态/日志，比遥测丢帧严重）被记过一次日志——每个连接只记一次，
-    // 避免慢客户端把日志刷屏；连接断开时在 dropClient() 里清掉对应条目。
+    // 慢客户端丢帧：::send 设了 SO_SNDTIMEO=200ms，超时即丢这一帧而不是拖死
+    // telemetry/accept 线程（见 sendFrameTo）。但如果超时发生在**帧发到一半**
+    // （帧头或 payload 已经部分写出去之后），这一帧不能只是丢弃——接收侧
+    // （gui/ipc_client.py、tests/hw_driver.py）是纯长度前缀流，没有重同步能力，
+    // 半帧会导致后续所有帧被错位解析、协议流永久失步。这种情况必须直接断开
+    // 该连接（evictClient，见 sendFrameTo 里的 Torn 分支），逼客户端重连拿一条
+    // 干净的流。只有恰好卡在帧边界（一个字节都没发出去）的超时才能安全丢帧。
+    //
+    // slow_client_drops_ 是跨全部连接的累计总数，用于诊断"GUI 曾经冻结过"，
+    // 也透出到 statusJson()——它不按连接区分，多个慢客户端同时出现时，
+    // 要看单条日志里带的 fd 才能定位是谁。
+    //
+    // per_client_drops_ 按 fd 记这条连接自己的丢帧数（一直卡在帧边界、没有触发
+    // 上面 Torn 分支的情况）：
+    //   - 从 0 变成 1（这条连接第一次丢帧）时，如果丢的是 JSON 帧
+    //     （应答/状态/日志，比遥测丢帧严重——客户端会以为命令没有响应），
+    //     立即记一条日志，且只记这一次，不按 100 取模，避免刷屏；
+    //   - 累计达到 kSlowClientEvictAfterDrops（这条连接终生丢帧数，不是"连续"，
+    //     粗粒度但零热路径开销）时判定它长期发不出去数据，主动 evictClient()
+    //     踢掉——否则一个总是恰好卡在帧边界、因此永远碰不到 Torn 分支的客户端
+    //     会占着连接名额、让每次广播都白等 200ms，直到天荒地老。
+    // fd 会被后续 accept() 复用，断开时（dropClient/forgetClient）必须清掉对应
+    // 条目，否则新连接会"继承"旧连接的丢帧史。
+    static constexpr uint32_t kSlowClientEvictAfterDrops = 300;  // ×最多200ms ≈ 累计 60s
     std::atomic<uint64_t> slow_client_drops_{0};
-    std::mutex warn_mu_;
-    std::unordered_set<int> json_drop_warned_;
+    std::mutex slow_client_mu_;
+    std::unordered_map<int, uint32_t> per_client_drops_;
 
     BusAction do_connect_, do_disconnect_, do_reconnect_, do_reset_encoder_;
     std::vector<Sample> tele_buf_;
