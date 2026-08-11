@@ -244,8 +244,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("与 Backend 断开，正在自动重连…")
         self.log_panel.append("WARNING", "与 Backend 断开连接")
         # 断开后不会再有 status 事件，按钮状态必须在这里显式重置，
-        # 否则会冻结在断开前的样子（后端崩溃时最容易踩到）
+        # 否则会冻结在断开前的样子（后端崩溃时最容易踩到）。
+        # cia_panel 同理：_running 若不复位，运行中断连会冻结在 True。
         self.system_panel.set_disconnected()
+        self.cia_panel.set_disconnected()
         self.top.update_status(_EMPTY_STATUS)
 
     def _on_connect_failed(self, why: str):

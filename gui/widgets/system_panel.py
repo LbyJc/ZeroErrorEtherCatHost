@@ -189,7 +189,7 @@ class SystemPanel(QWidget):
     # ── 状态刷新 ────────────────────────────────────────────────────────
     def update_status(self, st, ipc_connected: bool):
         g = st.get
-        self._running = bool(g("running", False))
+        self._running = g("running", False)
         if g("slave_online", False) and g("ethercat", "") == "OP":
             self.mark_already_running()
         self.r_backend.set_text("Running" if ipc_connected else "Stopped")

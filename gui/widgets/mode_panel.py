@@ -326,6 +326,7 @@ class ModePanel(QWidget):
             f"color:{COLOR_OK if matched else COLOR_WARN}; font-size:11px;")
 
         self._running = g("running", False)
+        online = g("slave_online", False)
         ec_op = g("ethercat", "") == "OP"
         enabled = g("servo", "") == "Operation Enabled"
         faulted = g("servo", "") in ("Fault", "Fault Reaction Active")
@@ -334,6 +335,9 @@ class ModePanel(QWidget):
         self._can_run = ec_op and enabled and matched and not faulted
         self.btn_run.setEnabled(self._can_run and not self._running)
         self.btn_stop.setEnabled(self._running)
+        # 与 cia402_panel.py 的 Quick Stop 同条件（online and enabled）：
+        # 撤使能类动作只在伺服确实使能时才有意义，离线/未使能时置灰。
+        self.btn_safe_stop.setEnabled(online and enabled)
 
         # 运行中禁止切模式/控制器/轨迹（任务书第四十一节）
         for rb in self._mode_buttons.values():

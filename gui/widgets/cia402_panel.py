@@ -150,9 +150,19 @@ class Cia402Panel(QWidget):
             self.command.emit({"cmd": "reset_load_encoder"})
 
     # ── 刷新 ────────────────────────────────────────────────────────────
+    def set_disconnected(self):
+        """与 Backend 断开时调用。
+
+        与 system_panel.set_disconnected() 同理：断开后不会再有 status 事件，
+        _running 必须显式复位，否则运行中断连会让它冻结在 True——虽然失效方向
+        是安全侧（多弹一次确认框，不会漏掉该弹的确认），但仍是过期状态，
+        应该跟真实情况一致。
+        """
+        self._running = False
+
     def update_status(self, st):
         g = st.get
-        self._running = bool(g("running", False))
+        self._running = g("running", False)
         state = g("servo", "Unknown")
         kind, desc = STATE_STYLE.get(state, ("idle", ""))
         self.lamp.set_state(kind, state, desc)
