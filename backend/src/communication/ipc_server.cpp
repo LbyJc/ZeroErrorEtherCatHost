@@ -505,6 +505,13 @@ void IpcServer::handleLine(const std::string& line) {
         } else { rt_->servoEnable(); }
     } else if (cmd == "servo_disable") {
         rt_->servoDisable();
+    } else if (cmd == "safe_stop") {
+        // GUI 侧的"安全停机"入口：语义上与 servo_disable 相同——
+        // 停止运行、置 stopping_、下 DisableVoltage 目标；真正的安全等待
+        // （软停到 2.5 rpm 以下才真正切电）在 RT 主循环里统一做（见 realtime_task.cpp
+        // 的 isSafeToDisableAt 门控，Task 3 已加）。这里不需要另开一个函数。
+        rt_->servoDisable();
+        log("INFO", "已请求安全停机：软停至 2.5 rpm 以下后撤使能");
     } else if (cmd == "fault_reset") {
         rt_->faultReset();
     } else if (cmd == "quick_stop") {

@@ -46,6 +46,7 @@ class Cia402Panel(QWidget):
         super().__init__(parent)
         self.cfg = cfg
         self._error_code = 0
+        self._running = False
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
@@ -96,7 +97,7 @@ class Cia402Panel(QWidget):
         cg.addWidget(self.btn_reset_enc, 2, 1)
 
         self.btn_enable.clicked.connect(lambda: self.command.emit({"cmd": "servo_enable"}))
-        self.btn_disable.clicked.connect(lambda: self.command.emit({"cmd": "servo_disable"}))
+        self.btn_disable.clicked.connect(self._on_servo_disable)
         self.btn_fault.clicked.connect(lambda: self.command.emit({"cmd": "fault_reset"}))
         self.btn_quick.clicked.connect(lambda: self.command.emit({"cmd": "quick_stop"}))
         self.btn_homing.clicked.connect(self._homing)
@@ -109,6 +110,24 @@ class Cia402Panel(QWidget):
         root.addStretch(1)
 
     # ── 动作 ────────────────────────────────────────────────────────────
+    def _on_servo_disable(self):
+        if self._running:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("正在运行中")
+            box.setText("关节正在运行。直接撤使能会在高速下抱闸。")
+            box.setInformativeText(
+                "手册 §7.1：制动器只许在 2.5 rpm（输出侧）以下承受动态制动，"
+                "高转速下触发会对运动组件造成永久性损坏。\n\n"
+                "建议改用【安全停机】：先软停到 2.5 rpm 以下再撤使能。")
+            safe = box.addButton("安全停机", QMessageBox.AcceptRole)
+            box.addButton("取消", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is safe:
+                self.command.emit({"cmd": "safe_stop"})
+            return
+        self.command.emit({"cmd": "servo_disable"})
+
     def _homing(self):
         if not self.cfg.supports_homing:
             QMessageBox.information(
@@ -133,6 +152,7 @@ class Cia402Panel(QWidget):
     # ── 刷新 ────────────────────────────────────────────────────────────
     def update_status(self, st):
         g = st.get
+        self._running = bool(g("running", False))
         state = g("servo", "Unknown")
         kind, desc = STATE_STYLE.get(state, ("idle", ""))
         self.lamp.set_state(kind, state, desc)

@@ -130,12 +130,19 @@ class ModePanel(QWidget):
         row = QHBoxLayout()
         self.btn_run = QPushButton("开始运行")
         self.btn_stop = QPushButton("停止运行")
+        self.btn_safe_stop = QPushButton("安全停机")
         self.btn_run.setMinimumHeight(40)
         self.btn_stop.setMinimumHeight(40)
+        self.btn_safe_stop.setMinimumHeight(40)
         self.btn_run.setStyleSheet("font-weight:bold; font-size:14px;")
         self.btn_stop.setStyleSheet("font-size:14px;")
+        self.btn_safe_stop.setStyleSheet("font-size:14px; color:#b71c1c; font-weight:bold;")
+        self.btn_safe_stop.setToolTip(
+            "软停至 2.5 rpm 以下后自动撤使能。\n"
+            "手册 §7.1：高于该转速抱闸会永久损坏运动组件。")
         row.addWidget(self.btn_run)
         row.addWidget(self.btn_stop)
+        row.addWidget(self.btn_safe_stop)
         rg.addLayout(row)
         self.run_hint = QLabel("")
         self.run_hint.setWordWrap(True)
@@ -143,6 +150,7 @@ class ModePanel(QWidget):
         rg.addWidget(self.run_hint)
         self.btn_run.clicked.connect(lambda: self.command.emit({"cmd": "start_run"}))
         self.btn_stop.clicked.connect(lambda: self.command.emit({"cmd": "stop_run"}))
+        self.btn_safe_stop.clicked.connect(lambda: self.command.emit({"cmd": "safe_stop"}))
         root.addWidget(rbox)
 
         root.addStretch(1)

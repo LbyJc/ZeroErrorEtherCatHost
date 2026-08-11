@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .common import COLOR_ERR, COLOR_OK, COLOR_WARN, ValueRow
@@ -35,6 +35,7 @@ class SystemPanel(QWidget):
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._running = False
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
@@ -68,7 +69,7 @@ class SystemPanel(QWidget):
         cg.addWidget(self.btn_stop, 0, 1)
         cg.addWidget(self.btn_reconnect, 1, 0, 1, 2)
         self.btn_start.clicked.connect(lambda: self._cmd("connect_bus"))
-        self.btn_stop.clicked.connect(lambda: self._cmd("disconnect_bus"))
+        self.btn_stop.clicked.connect(self._on_stop_master)
         self.btn_reconnect.clicked.connect(lambda: self._cmd("reconnect"))
         root.addWidget(ctl)
 
@@ -98,6 +99,15 @@ class SystemPanel(QWidget):
         root.addWidget(open_box)
 
         root.addStretch(1)
+
+    def _on_stop_master(self):
+        if self._running:
+            QMessageBox.warning(
+                self, "正在运行中",
+                "请先【停止运行】或【安全停机】，再停止主站。\n"
+                "停主站会等待软停完成（最长 20 s），运行中直接停会拉长该等待。")
+            return
+        self._cmd("disconnect_bus")
 
     def _cmd(self, name, **kw):
         self.command.emit({"cmd": name, **kw})
@@ -168,6 +178,7 @@ class SystemPanel(QWidget):
                   self.r_ec, self.r_wc, self.r_dc):
             r.set_text("—")
             r.set_color("#888")
+        self._running = False
         self.r_backend.set_text("Stopped")
         self.r_backend.set_color(COLOR_ERR)
         # 断开时唯一该亮的就是【启动主站】——它负责把后端拉起来
@@ -178,6 +189,7 @@ class SystemPanel(QWidget):
     # ── 状态刷新 ────────────────────────────────────────────────────────
     def update_status(self, st, ipc_connected: bool):
         g = st.get
+        self._running = bool(g("running", False))
         if g("slave_online", False) and g("ethercat", "") == "OP":
             self.mark_already_running()
         self.r_backend.set_text("Running" if ipc_connected else "Stopped")
