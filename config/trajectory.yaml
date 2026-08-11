@@ -42,4 +42,6 @@ trajectory:
   stop_ramp:
     csv_decel_rpm_per_s: 200.0
     cst_decel_Nm_per_s: 5.0
-    csp_hold_position: true     # CSP 停止 = 保持当前位置
+    csp_hold_position: false    # CSP 停止 = 保持当前实测位置。
+                                # 置 true 表示保持"本次 Run 开始时"的位置——那是位置阶跃，
+                                # CSP 下 0x6081/0x6083 不生效，会全速冲向该位置。

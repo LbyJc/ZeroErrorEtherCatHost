@@ -206,6 +206,7 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
             sc.output_velocity_rpm_max = get<double>(lim, "output_velocity_rpm_max", 25.0);
             sc.torque_Nm_max           = get<double>(lim, "torque_Nm_max", 20.0);
             sc.current_A_max           = get<double>(lim, "current_A_max", 6.3);
+            sc.csp_target_jump_deg_max = get<double>(lim, "csp_target_jump_deg_max", 5.0);
         }
         if (sc.motor_counts_per_rev <= 0 || sc.output_counts_per_rev <= 0 || sc.gear_ratio <= 0) {
             *err = "scaling.yaml: 编码器分辨率与减速比必须为正数";

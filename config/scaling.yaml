@@ -43,3 +43,4 @@ scaling:
     output_velocity_rpm_max: 25
     torque_Nm_max: 20.0                    # 远低于额定 31 Nm，实验安全余量
     current_A_max: 6.3
+    csp_target_jump_deg_max: 5.0   # CSP 目标位置与实测的最大允许偏差，超过即拒绝下发并软停

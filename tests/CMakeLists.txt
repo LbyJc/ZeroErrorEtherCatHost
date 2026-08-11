@@ -3,7 +3,7 @@ add_library(ecjc_test_main STATIC test_main.cpp)
 target_include_directories(ecjc_test_main PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ecjc_test_main PUBLIC ecjc_core)
 
-foreach(t test_cia402 test_scaling test_trajectory test_ring_buffer)
+foreach(t test_cia402 test_scaling test_trajectory test_ring_buffer test_stop_ramp)
   add_executable(${t} ${t}.cpp)
   target_link_libraries(${t} PRIVATE ecjc_test_main)
   add_test(NAME ${t} COMMAND ${t})

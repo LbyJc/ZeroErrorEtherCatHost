@@ -42,6 +42,7 @@ struct ScalingConfig {
     double output_velocity_rpm_max = 25.0;
     double torque_Nm_max           = 20.0;
     double current_A_max           = 6.3;
+    double csp_target_jump_deg_max = 5.0;   ///< CSP 目标与实测的最大允许偏差
 };
 
 /// 多圈展开器。

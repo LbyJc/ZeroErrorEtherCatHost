@@ -93,8 +93,17 @@ struct GuiCfg {
 struct StopRampCfg {
     double csv_decel_rpm_per_s = 200.0;
     double cst_decel_Nm_per_s = 5.0;
-    bool   csp_hold_position = true;
+    bool   csp_hold_position = false;   // CSP 停止 = 保持"当前实测位置"。
+                                        // 置 true 会保持"本次 Run 开始时"的位置，
+                                        // 那是一次位置阶跃，CSP 下驱动器不做 profile 限制。
 };
+
+/// CSP 停止时应下发的目标位置。
+/// hold_deg  = 本次 Run 开始时记录的位置
+/// current_deg = 当前实测位置
+inline double cspStopTarget(const StopRampCfg& cfg, double hold_deg, double current_deg) {
+    return cfg.csp_hold_position ? hold_deg : current_deg;
+}
 
 struct ControllerCfg {
     std::string default_id = "passthrough";
