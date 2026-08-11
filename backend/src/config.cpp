@@ -249,7 +249,11 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
         if (auto s = t["stop_ramp"]) {
             o->stop_ramp.csv_decel_rpm_per_s = get<double>(s, "csv_decel_rpm_per_s", 200.0);
             o->stop_ramp.cst_decel_Nm_per_s  = get<double>(s, "cst_decel_Nm_per_s", 5.0);
-            o->stop_ramp.csp_hold_position   = get<bool>(s, "csp_hold_position", true);
+            // 默认值必须和 StopRampCfg 的 struct 默认值（false）、config/*.yaml
+            // 里的显式值保持一致——这三处曾经只改了两处，缺 key 的旧配置目录
+            // （没写 csp_hold_position 这一行）会在这里悄悄复活"保持 Run 起始
+            // 位置"的危险默认行为（终审 finding I1）。
+            o->stop_ramp.csp_hold_position   = get<bool>(s, "csp_hold_position", false);
             o->stop_ramp.disable_timeout_cycles =
                 static_cast<uint64_t>(get<double>(s, "disable_timeout_cycles", 15000.0));
         }
