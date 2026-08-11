@@ -58,13 +58,41 @@ int acquireInstanceLock(const std::string& sock_path) {
     return fd;   // 故意不关：进程存活期间持锁
 }
 
-/// 关闭兜底：正常停机流程若卡住，10 秒后强制退出。
+// ── 停机时间预算 ──────────────────────────────────────────────────────────
+// 终审 finding C2：原来看门狗 10s 硬编码，跟 disconnect() 里"等软停真正走完"
+// 的等待预算完全脱节——3000 电机 rpm 按 200 rpm/s 减速需要 15s，看门狗永远
+// 先杀进程，死在减速中途。这三个数必须来自同一份推导，写在一起、互相引用，
+// 防止以后有人只改其中一个（当初正是这么漂移出 bug 的）。
+//
+//   kDisconnectWaitSec   —— disconnect() 等"软停到位（isSafeToDisableAt）"
+//                            的外部等待上限。3000rpm/200rpm/s=15s，这里留到
+//                            20s 给减速度更慢/负载扰动的余量。
+//   kDisableGateBudgetSec —— RT 线程自己那份门控预算（config/motion.yaml 的
+//                            stop_ramp.disable_timeout_cycles，默认 1kHz 下
+//                            15s）。disconnect() 的 20s 等待结束后才会调用
+//                            servoDisable()，届时这份预算才开始倒数——而且
+//                            realtime_task.cpp 的 cycle() 门控与 threadMain()
+//                            退出序列的门控共用同一个 disable_wait_cycles_
+//                            计数器（finding I3），不会被重复消耗，但也不会
+//                            提前消耗，所以这两段预算是**先后接力、不是并发
+//                            的**，看门狗必须覆盖它们的和。
+//                            若改了 stop_ramp.disable_timeout_cycles 的默认值，
+//                            必须同步检查这个常量还够不够。
+//   kShutdownWatchdogSec  —— 二者之和 + 收尾开销（servoDisable 后的 500ms
+//                            制动器动作等待、deactivate/release/join 的
+//                            系统调用开销）的余量。
+constexpr int kDisconnectWaitSec    = 20;
+constexpr int kDisableGateBudgetSec = 15;
+constexpr int kShutdownWatchdogSec  = kDisconnectWaitSec + kDisableGateBudgetSec + 5;  // 40s
+
+/// 关闭兜底：正常停机流程若卡住，kShutdownWatchdogSec 秒后强制退出。
 /// 现场遇到过 SIGTERM 之后进程释放了主站却一直不退，留下孤儿进程。
-/// 宁可粗暴退出，也不要留一个既不干活又占着名字的僵尸。
+/// 宁可粗暴退出，也不要留一个既不干活又占着名字的僵尸——但这个"粗暴"必须
+/// 晚于所有合法的软停等待走完，否则看门狗自己就是那个把制动器烧了的元凶。
 void armShutdownWatchdog() {
     std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-        fprintf(stderr, "[WARN] 正常停机超过 10 秒未完成，强制退出\n");
+        std::this_thread::sleep_for(std::chrono::seconds(kShutdownWatchdogSec));
+        fprintf(stderr, "[WARN] 正常停机超过 %d 秒未完成，强制退出\n", kShutdownWatchdogSec);
         ::_exit(0);
     }).detach();
 }
@@ -111,6 +139,24 @@ int main(int argc, char** argv) {
     if (!cfg.scaling.resolution_verified)
         printf("[WARN] 输出侧编码器分辨率 %.0f counts/rev 未经物理转角验证，"
                "若实为其一半则所有 rpm 数值翻倍\n", cfg.scaling.output_counts_per_rev);
+
+    // 关机看门狗预算是按 kDisableGateBudgetSec（15s）硬编码推导的（见
+    // armShutdownWatchdog() 前的注释）。如果这份配置的软停超时预算比这个假设
+    // 大，看门狗可能会在 RT 线程还在合法门控等待中时就把进程杀了——这正是
+    // finding C2 的病根，改配置不该悄悄把它带回来，这里显式报警而不是沉默。
+    {
+        const double configured_gate_s =
+            static_cast<double>(cfg.stop_ramp.disable_timeout_cycles) *
+            cfg.ethercat.cycle_us / 1e6;
+        if (configured_gate_s > kDisableGateBudgetSec) {
+            fprintf(stderr,
+                    "[WARN] config 的 stop_ramp.disable_timeout_cycles 换算约 %.1f s，"
+                    "超过 main.cpp 里 kShutdownWatchdogSec 推导时假设的 %d s——"
+                    "关机看门狗（%d s）可能在软停门控还没做完时就强制杀进程，"
+                    "请同步调大 kDisableGateBudgetSec\n",
+                    configured_gate_s, kDisableGateBudgetSec, kShutdownWatchdogSec);
+        }
+    }
 
     // ── 装配 ──────────────────────────────────────────────────────────
     auto bus = mock ? makeMockBus() : makeIghBus();
@@ -162,8 +208,10 @@ int main(int argc, char** argv) {
         (void)e;
         rt.stopRun();
         // 等软停真正走完，而不是拍一个固定的 300ms。
-        // 按 csv_decel_rpm_per_s=200，从 3000 电机 rpm 减到零需 15 s。
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        // 按 csv_decel_rpm_per_s=200，从 3000 电机 rpm 减到零需 15 s；
+        // kDisconnectWaitSec 与看门狗预算 kShutdownWatchdogSec 来自同一份推导
+        // （见 armShutdownWatchdog() 前的注释），不要在这里单独改数字。
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kDisconnectWaitSec);
         while (std::chrono::steady_clock::now() < deadline) {
             const auto st = rt.snapshot();
             if (isSafeToDisableAt(st.joint.output_vel_rpm, st.stopping)) break;
