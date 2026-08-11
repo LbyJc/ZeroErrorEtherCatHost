@@ -2,6 +2,7 @@
 
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -260,6 +261,17 @@ void IpcServer::threadMain() {
         const int fd = ::accept(listen_fd_, nullptr, nullptr);
         if (fd < 0) { if (quit_.load()) break; usleep(100000); continue; }
 
+        // 发送超时：慢客户端不得拖死 telemetry 与 accept 线程。必须在这个 fd 上
+        // 第一次 send() 之前生效——包括紧接着可能发生的"人数已满，拒绝连接"消息、
+        // 以及下面 push_back 之后的首次状态/参数单发。450 h 无人值守时
+        // GUI 冻结/笔记本休眠/SSH 断线都是必然会发生的事件。
+        {
+            struct timeval tv{};
+            tv.tv_sec  = 0;
+            tv.tv_usec = 200000;      // 200 ms
+            ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        }
+
         {
             std::unique_lock<std::mutex> lk(clients_mu_);
             if (clients_.size() >= kMaxClients) {
@@ -271,6 +283,7 @@ void IpcServer::threadMain() {
                 sendFrameTo(fd, static_cast<uint16_t>(FrameType::Json),
                             msg.data(), msg.size());
                 ::close(fd);
+                { std::lock_guard<std::mutex> wl(warn_mu_); json_drop_warned_.erase(fd); }
                 continue;
             }
             clients_.push_back(fd);
@@ -316,6 +329,12 @@ void IpcServer::dropClient(int fd) {
         }
         last = clients_.empty();
     }
+    {
+        // fd 会被后续 accept() 复用；不清掉的话，新连接可能"继承"到旧连接
+        // 已经记过日志的状态，导致它真正第一次丢帧时反而不记日志了。
+        std::lock_guard<std::mutex> lk(warn_mu_);
+        json_drop_warned_.erase(fd);
+    }
     ::close(fd);
 
     // 只有**最后一个**客户端断开才算"失去操作者"。
@@ -330,16 +349,48 @@ void IpcServer::sendFrameTo(int fd, uint16_t type, const void* payload, size_t l
     if (fd < 0) return;
     FrameHeader h{kFrameMagic, type, kProtocolVersion, static_cast<uint32_t>(len)};
 
-    // send_mu_ 保证一帧不会被另一个线程的帧插进来切碎
-    std::lock_guard<std::mutex> lk(send_mu_);
-    // MSG_NOSIGNAL：客户端突然消失时不要给我们一个 SIGPIPE 把进程干掉
-    if (::send(fd, &h, sizeof h, MSG_NOSIGNAL) != static_cast<ssize_t>(sizeof h)) return;
-    size_t off = 0;
-    const char* p = static_cast<const char*>(payload);
-    while (off < len) {
-        const ssize_t n = ::send(fd, p + off, len - off, MSG_NOSIGNAL);
-        if (n <= 0) return;
-        off += static_cast<size_t>(n);
+    // 该 fd 在 accept 后已被设了 SO_SNDTIMEO=200ms（见 threadMain），
+    // 所以下面这些 ::send 最坏情况阻塞 200ms 就会带着 EAGAIN/EWOULDBLOCK 返回，
+    // 不会无限阻塞——不管是被这个 send_mu_ 锁住的其它线程，还是 accept 线程本身。
+    bool slow = false;
+    {
+        // send_mu_ 保证一帧不会被另一个线程的帧插进来切碎
+        std::lock_guard<std::mutex> lk(send_mu_);
+        // MSG_NOSIGNAL：客户端突然消失时不要给我们一个 SIGPIPE 把进程干掉
+        if (::send(fd, &h, sizeof h, MSG_NOSIGNAL) != static_cast<ssize_t>(sizeof h)) {
+            slow = (errno == EAGAIN || errno == EWOULDBLOCK);
+        } else {
+            size_t off = 0;
+            const char* p = static_cast<const char*>(payload);
+            while (off < len) {
+                const ssize_t n = ::send(fd, p + off, len - off, MSG_NOSIGNAL);
+                if (n <= 0) {
+                    slow = (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+                    break;
+                }
+                off += static_cast<size_t>(n);
+            }
+        }
+    }  // send_mu_ 在这里释放——下面可能调用 log()，它自己也要发帧，绝不能在持锁时调用
+
+    if (!slow) return;
+
+    const uint64_t total = ++slow_client_drops_;
+    if (type == static_cast<uint16_t>(FrameType::Json)) {
+        // JSON 帧＝命令应答/状态/日志/参数表。丢它比丢一帧遥测严重得多：
+        // 客户端会以为自己的命令没有响应。每个连接只记一次，避免慢客户端刷屏日志。
+        bool first_for_this_fd = false;
+        {
+            std::lock_guard<std::mutex> lk(warn_mu_);
+            first_for_this_fd = json_drop_warned_.insert(fd).second;
+        }
+        if (first_for_this_fd) {
+            log("WARNING", "客户端读取过慢，控制帧（应答/状态/日志）被丢弃，该客户端可能收不到命令响应，fd=" +
+                            std::to_string(fd));
+        }
+    } else if (total % 100 == 1) {
+        // 遥测帧：高频、允许偶尔丢，按 100 取模记日志，避免刷屏。
+        log("WARNING", "客户端读取过慢，已丢弃 " + std::to_string(total) + " 帧");
     }
 }
 
@@ -413,6 +464,9 @@ std::string IpcServer::statusJson() {
       << ",\"gear_ratio\":"     << num(cfg_.scaling.gear_ratio)
       << ",\"supports_homing\":" << (cfg_.slave.supports_homing ? "true" : "false")
       << ",\"last_error\":\""   << esc(s.last_error) << "\""
+      // 慢客户端丢帧总数：GUI 冻结/休眠期间被丢弃的帧数（遥测+控制帧合计）。
+      // 450 h 无人值守时，这是诊断"GUI 曾经卡住过"的唯一痕迹。
+      << ",\"slow_client_drops\":" << slow_client_drops_.load()
       << "}";
     return o.str();
 }

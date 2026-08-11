@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "ecjc/config.hpp"
@@ -76,6 +77,15 @@ private:
     std::thread accept_th_, telemetry_th_;
     std::atomic<bool> quit_{false};
     std::mutex send_mu_;
+
+    // 慢客户端丢帧：::send 设了 SO_SNDTIMEO，超时即丢这一帧而不是拖死
+    // telemetry/accept 线程（见 sendFrameTo）。总数用于诊断"GUI 曾经冻结过"，
+    // 也透出到 statusJson()。json_drop_warned_ 记录哪些 fd 已经因为丢失
+    // JSON 帧（应答/状态/日志，比遥测丢帧严重）被记过一次日志——每个连接只记一次，
+    // 避免慢客户端把日志刷屏；连接断开时在 dropClient() 里清掉对应条目。
+    std::atomic<uint64_t> slow_client_drops_{0};
+    std::mutex warn_mu_;
+    std::unordered_set<int> json_drop_warned_;
 
     BusAction do_connect_, do_disconnect_, do_reconnect_, do_reset_encoder_;
     std::vector<Sample> tele_buf_;
