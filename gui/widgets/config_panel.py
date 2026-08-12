@@ -37,7 +37,7 @@ class ConfigPanel(QWidget):
             ("减速比", f"{s.get('gear_ratio', 0)} : 1  (铭牌标称 120)"),
             ("额定电流", f"{s.get('rated_current_mA', 0)/1000:.1f} A"),
             ("额定力矩", f"{s.get('rated_torque_mNm', 0)/1000:.1f} Nm"),
-            ("0x60FF 单位", "0x6064 的 counts/s（实测增益 1.0006）"),
+            ("0x60FF 单位", "0x6064 的 counts/s（velocity_gain_correction 现为 1.0，未应用任何实测速度标定）"),
             ("电机侧 100 rpm", "0x60FF ≈ 7207（实测 99.89 rpm）"),
         ]
         for k, v in rows:

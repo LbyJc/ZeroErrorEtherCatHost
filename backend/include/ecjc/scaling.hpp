@@ -147,6 +147,18 @@ public:
     /// 电机侧 rpm ↔ 0x60FF 原始值 的比例，GUI 用来显示"当前 1 rpm = ? 计数"
     double countsPerMotorRpm() const;
 
+    // ── 谐波减速器扭转角（0x2241）与 rad 换算 ──────────────────────────────
+    /// 0x2241 原始计数（电机侧 17 位）→ 输出侧角分。
+    double twistCountsToArcmin(int32_t counts) const;
+    /// 由电机侧/输出侧位置计数算出的"应有"扭转角差，单位与 twistCountsToArcmin
+    /// 的输入同尺度（电机侧 counts）：Δ = C_m − k×C_o，k = motor_cpr/output_cpr×gear_ratio。
+    /// 本机配置下 k = 30.25（= 121/4，精确有理数），是 J5 判据的实现基础。
+    double expectedTwistFromPositions(int32_t motor_counts, int32_t output_counts) const;
+    /// 输出侧 counts → rad（2π/output_counts_per_rev）
+    double outputCountsToRad(int64_t counts) const;
+    /// 角分 → rad
+    static double arcminToRad(double arcmin);
+
 private:
     ScalingConfig c_;
     PositionUnwrapper motor_uw_, output_uw_;

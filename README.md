@@ -118,7 +118,7 @@ python tools/h5_to_csv.py data/exp_*.h5 --fields elapsed_time_s,motor_velocity_r
 | 电机侧编码器 | 131072 counts/rev (2^17) |
 | 输出侧编码器 | 524288 counts/rev (2^19)，**已用物理转角验证** |
 | 减速比 | **121 : 1**（铭牌标称 120，实测 Δ0x2240/Δ0x6064 = 30.24 ≈ 121/4） |
-| `0x60FF` 单位 | `0x6064` 的 counts/s，增益 1.0006 |
+| `0x60FF` 单位 | `0x6064` 的 counts/s，`velocity_gain_correction` 现为 1.0（未应用任何实测速度标定） |
 | 电机侧 100 rpm | `0x60FF ≈ 7207`（实测 99.89 rpm） |
 | 额定电流 / 力矩 | 6300 mA / 31000 mNm |
 

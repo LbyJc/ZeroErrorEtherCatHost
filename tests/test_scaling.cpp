@@ -158,3 +158,45 @@ TEST(方向取反) {
     s.toPhysical(raw, &j);
     CHECK(j.output_vel_rpm < 0);
 }
+
+// 力矩必须和电流一样受 current_direction 影响，否则 P = τ·ω 算出来符号是错的
+TEST(torque_respects_direction_sign) {
+    ScalingConfig c;
+    c.rated_torque_mNm = 31000.0;
+    c.torque_scale = 0.001;
+    c.current_direction = -1;
+    Scaling s(c);
+    RawIo raw{};
+    raw.torque_actual = 500;              // 千分之 500 = 半额定
+    JointState j{};
+    s.toPhysical(raw, &j);
+    CHECK_NEAR(j.torque_Nm, -15.5, 1e-6);  // 方向为负 ⇒ 力矩为负
+}
+
+// 0x2241 换算：1 count = 21600 / (131072 × 121) 角分（输出侧）
+TEST(twist_counts_to_arcmin) {
+    ScalingConfig c;                        // 默认 131072 / 524288 / 121
+    Scaling s(c);
+    CHECK_NEAR(s.twistCountsToArcmin(1), 1.3619417e-3, 1e-9);
+    CHECK_NEAR(s.twistCountsToArcmin(267), 0.36363, 1e-4);  // 手册表22-2 的零扭矩开口量级
+}
+
+// 恒等式 Δ = C_m − 30.25 × C_o，30.25 = 121/4 是精确有理数
+TEST(expected_twist_identity_uses_exact_30p25) {
+    ScalingConfig c;
+    Scaling s(c);
+    CHECK_NEAR(s.expectedTwistFromPositions(30250, 1000), 0.0, 1e-9);
+    CHECK_NEAR(s.expectedTwistFromPositions(30251, 1000), 1.0, 1e-9);
+}
+
+// rad 换算：计划附录 A.1 要求 theta_out_rad
+TEST(output_counts_to_rad) {
+    ScalingConfig c;
+    Scaling s(c);
+    CHECK_NEAR(s.outputCountsToRad(1), 1.198422e-5, 1e-11);
+    CHECK_NEAR(s.outputCountsToRad(524288), 6.283185307, 1e-6);  // 整圈 = 2π
+}
+
+TEST(arcmin_to_rad) {
+    CHECK_NEAR(Scaling::arcminToRad(1.0), 2.908882e-4, 1e-10);
+}

@@ -29,17 +29,20 @@ void Scaling::toPhysical(const RawIo& raw, JointState* o) {
     o->motor_pos_deg  = wrapDeg360(o->motor_pos_unwrapped_deg);
 
     // ── 速度 ──────────────────────────────────────────────────────────
-    // 0x606C 单位 = 0x6064 的 counts/s（实测：写 0x60FF=7207 → 回读 7211.6）
+    // 0x606C 单位 = 输出侧 counts/s（手册 §12：n = 值/524288×60，"速度反馈是输出端的转速反馈"）。
+    // ⚠ velocity_gain_correction 当前为 1.0，链路里**没有应用任何实测速度标定**。
+    //   此处曾注释"实测增益 1.0006"，那是跟随误差与减速比推算的混合产物，不是单位标定。
     const double out_cps = dir_v * static_cast<double>(raw.velocity_actual) *
                            c_.velocity_gain_correction;
     o->output_vel_rpm = out_cps / c_.output_counts_per_rev * 60.0;
     o->motor_vel_rpm  = o->output_vel_rpm * c_.gear_ratio;
 
     // ── 电流 / 力矩 ───────────────────────────────────────────────────
-    // 0x6078 / 0x6077 都是额定值的千分比
+    // 0x6078 / 0x6077 都是额定值的千分比，两者都要乘方向系数——
+    // 力矩此前漏了 dir_i，方向取反时电流与力矩符号会不一致，P = τ·ω 算错。
     o->current_A = dir_i * static_cast<double>(raw.current_actual) *
                    c_.current_scale * (c_.rated_current_mA / 1000.0);
-    o->torque_Nm = static_cast<double>(raw.torque_actual) *
+    o->torque_Nm = dir_i * static_cast<double>(raw.torque_actual) *
                    c_.torque_scale * (c_.rated_torque_mNm / 1000.0);
 }
 
@@ -89,6 +92,28 @@ int16_t Scaling::nmToTargetTorque(double nm) const {
 double Scaling::countsPerMotorRpm() const {
     // 电机侧 1 rpm 对应多少 0x60FF 计数
     return c_.output_counts_per_rev / 60.0 / c_.gear_ratio / c_.velocity_gain_correction;
+}
+
+double Scaling::twistCountsToArcmin(int32_t counts) const {
+    // 0x2241 以电机侧 17 位计数表达（手册 §22 表22-1）。
+    // 换算到输出侧角分：counts / motor_cpr × 21600 / gear_ratio
+    return static_cast<double>(counts) * 21600.0
+           / (c_.motor_counts_per_rev * c_.gear_ratio);
+}
+
+double Scaling::expectedTwistFromPositions(int32_t motor_counts, int32_t output_counts) const {
+    // Δ = C_m − (motor_cpr / output_cpr × gear_ratio) × C_o
+    // 本机 = C_m − (131072/524288 × 121) × C_o = C_m − 30.25 × C_o（精确有理数 121/4）
+    const double k = c_.motor_counts_per_rev / c_.output_counts_per_rev * c_.gear_ratio;
+    return static_cast<double>(motor_counts) - k * static_cast<double>(output_counts);
+}
+
+double Scaling::outputCountsToRad(int64_t counts) const {
+    return static_cast<double>(counts) / c_.output_counts_per_rev * 2.0 * M_PI;
+}
+
+double Scaling::arcminToRad(double arcmin) {
+    return arcmin * M_PI / 10800.0;     // 2.908882e-4
 }
 
 }  // namespace ecjc
