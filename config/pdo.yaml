@@ -59,6 +59,22 @@ pdo:
       entries:
         - {index: 0x60F4, sub: 0x00, bits: 32, type: i32, name: following_error}
 
+    # ── 0x1A00：ESI 中唯一 Fixed="0" 的 TxPDO，可改写条目表 ──
+    # 手册 §16.1：「0x1A00/0x1600 映射 TxPDO/RxPDO 支持任意 mapping 配置
+    #              （TxPDO、RxPDO 最大字节数各为 76 字节）」
+    # Exclude 仅含 0x1A01~0x1A04，本工程一个都不用，可与 1A06/07/0D/1F/08/18/19 共存。
+    #
+    # 为什么必须做：0x2241 由驱动器在两个编码器同一 50µs 采样点上算出（手册 §22）。
+    # 若改由主站拿异步 SDO 的 0x2240 与 PDO 的 0x6064 相减，时间偏斜 τ 会引入
+    # 2·ω_out·τ 的误差——正反向符号相反，在回程误差里**翻倍不抵消**。
+    # 5 rpm、τ=5ms（异步 SDO 实测抖动）⇒ 约 18 角分，是 h_obs（0.4~1.5 角分）的 20~45 倍。
+    #
+    # ⚠ Task 15 分级放开：先只放 0x2240，确认进 OP 后再放 0x2241。
+    # - index: 0x1A00
+    #   entries:
+    #     - {index: 0x2240, sub: 0x00, bits: 32, type: i32, name: motor_position_pdo}
+    #     - {index: 0x2241, sub: 0x00, bits: 32, type: i32, name: twist_counts}
+
 # ── 电机侧位置：只能异步 SDO ──────────────────────────────────────────────
 # 0x2240 "Motor Encoder Position" 不在任何 PDO 里（已遍历 ESI 全部 RxPdo/TxPdo 确认）。
 # 因此用 ecrt_slave_config_create_sdo_request() 建异步请求，在 RT 循环里非阻塞轮询。
