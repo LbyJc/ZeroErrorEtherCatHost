@@ -282,6 +282,17 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
 #undef COL_U16
 #undef COL_U8
 #undef COL_I8
+
+    // 运行期真校验：k 是宏链实际展开并成功写出的列数。若 ECJC_SAMPLE_COLUMNS
+    // 的某个 X 分支被改动导致漏展开/重复展开某个 tag（例如手滑删了一行、
+    // COL_##tag 拼错成不存在的宏名之外的另一个已存在宏名），编译期不会报错，
+    // 但这里会当场抓到——不能指望单元测试覆盖每一种展开错误的组合。
+    if (k != impl_->cols.size()) {
+        *err = "列写入数与建列数不一致：写了 " + std::to_string(k) +
+               " 列，应为 " + std::to_string(impl_->cols.size()) +
+               " 列——X-macro 展开点被改动过";
+        return false;
+    }
     return true;
 
 fail:
