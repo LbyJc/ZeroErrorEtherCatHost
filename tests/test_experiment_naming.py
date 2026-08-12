@@ -27,12 +27,14 @@ def test_csv_filename_accepts_all_valid_items():
         en.csv_filename("A01", 100, item, 0, 5, 1)   # 不抛异常即通过
 
 
-def test_a1_columns_contain_empty_columns_in_order():
+def test_a1_columns_well_formed():
+    # 三个留空列必须在公共字段列表里
     for c in en.EMPTY_COLUMNS:
         assert c in en.A1_COLUMNS
-    # 留空三列必须在公共字段区，不在末尾扩展列
-    assert en.A1_COLUMNS.index("theta_out_rad") < en.A1_COLUMNS.index("load_torque_Nm_actual") or \
-           "theta_out_rad" in en.A1_COLUMNS
+    # 列名不得重复（重复会让 CSV 表头出现两个同名列）
+    assert len(en.A1_COLUMNS) == len(set(en.A1_COLUMNS))
+    # sample_id 必须是第一列（下游按位置读的兼容性）
+    assert en.A1_COLUMNS[0] == "sample_id"
 
 
 def test_meta_yaml_declares_empty_columns():
