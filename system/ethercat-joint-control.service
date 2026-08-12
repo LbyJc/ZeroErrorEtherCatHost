@@ -30,8 +30,11 @@ LimitNICE=-20
 Restart=on-failure
 RestartSec=3
 KillSignal=SIGTERM
-# 给足时间走完安全停机顺序：停轨迹 → 归零 → 撤使能 → deactivate → 释放主站
-TimeoutStopSec=30
+# 给足时间走完安全停机顺序：停轨迹 → 软停到 <2.5rpm → 撤使能 → deactivate → 释放主站。
+# ⚠ 必须 ≥ 后端自身的停机预算（main.cpp: disconnect 等待 20s + 500ms + RT 退出门控 15s
+#   + 关机看门狗 40s）。P0 之前是 300ms 直接切电、systemd 30s 永远碰不到；P0 把停机路径
+#   拉长到最坏 ~35.5s 后，30s 会在软停中途 SIGKILL、死在减速中（手册 §7.1：>2.5rpm 抱闸永久损坏）。
+TimeoutStopSec=50
 
 StandardOutput=journal
 StandardError=journal
