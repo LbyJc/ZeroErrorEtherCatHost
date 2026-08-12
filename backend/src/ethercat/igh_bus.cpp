@@ -486,6 +486,20 @@ private:
         size_t rs = 0;
         if (!blockingSdoRead(index, sub, buf, sz, &rs, err)) return false;
 
+        // 终审 finding I4②：从站实际返回的宽度与 config.yaml 里配置的 type
+        // 不符时，此前会直接按配置宽度去解码 buf——多读的字节被静默忽略，
+        // 少读的字节则读到 buf 里未写入的陈旧/清零区域，两种情况都是错误
+        // 数值而不报错。这里显式比对拒绝，走既有 INT64_MIN -> "read_failed"
+        // 的调用方路径。
+        if (rs != sz) {
+            char b[160];
+            snprintf(b, sizeof b,
+                     "0x%04X:%02X 实际宽度 %zu 与配置 type(%s, %zu 字节) 不符",
+                     index, sub, rs, type.c_str(), sz);
+            *err = b;
+            return false;
+        }
+
         if      (type == "u8")  *out = EC_READ_U8(buf);
         else if (type == "i8")  *out = EC_READ_S8(buf);
         else if (type == "u16") *out = EC_READ_U16(buf);

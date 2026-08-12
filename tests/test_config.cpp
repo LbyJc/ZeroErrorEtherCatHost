@@ -80,3 +80,24 @@ TEST(config_rejects_zero_gear_ratio) {
     CHECK(!loadConfig(dir.string(), &cfg, &err));
     CHECK(err.find("减速比") != std::string::npos);
 }
+
+// 拒绝路径（终审 finding I4①）：diagnostic_sdos 里的非法 type 必须被启动时的
+// 校验拦下，错误信息里要能看到写错的值与合法集合，不是含糊的"配置错误"。
+TEST(config_rejects_invalid_diagnostic_sdo_type) {
+    auto dir = makeConfigDir("badtype", "  gear_ratio: 121.0\n");
+    // 覆盖 slave.yaml：塞一个 diagnostic_sdos 条目，type 写成不存在的 "u64"
+    {
+        FILE* f = fopen((dir / "slave.yaml").c_str(), "w");
+        const std::string body =
+            "slave:\n  vendor_id: 0x5a65726f\n  product_code: 0x00029252\n"
+            "  min_cycle_us: 500\n"
+            "diagnostic_sdos:\n"
+            "  - {index: 0x6093, sub: 0x01, type: u64, name: \"bad\"}\n";
+        fwrite(body.data(), 1, body.size(), f);
+        fclose(f);
+    }
+    FullConfig cfg; std::string err;
+    CHECK(!loadConfig(dir.string(), &cfg, &err));
+    CHECK(err.find("u64") != std::string::npos);
+    CHECK(err.find("u8") != std::string::npos);   // 合法集合提示里含 u8
+}

@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 
@@ -23,6 +24,29 @@ template <typename T>
 T get(const YAML::Node& n, const char* key, T def) {
     if (!n || !n[key]) return def;
     try { return n[key].as<T>(); } catch (...) { return def; }
+}
+
+// 终审 finding I4①：diagnostic_sdos / async_sdo 的 type 字段此前不做任何
+// 合法性校验——写错一个 typo（比如 "u64"）会静默落到 blockingSdoReadTyped /
+// pollAsyncSdo 的"未识别类型回落到 s32"分支，读出来的数值看着正常，实际上
+// 位宽全错，没有任何报错线索。
+const char* kValidSdoTypes = "u8, i8, u16, i16, u32, i32";
+
+bool isValidSdoType(const std::string& t) {
+    return t == "u8" || t == "i8" || t == "u16" || t == "i16" ||
+           t == "u32" || t == "i32";
+}
+
+std::string hex04(uint32_t v) {
+    char b[8];
+    snprintf(b, sizeof b, "0x%04X", v);
+    return b;
+}
+
+std::string hex02(uint32_t v) {
+    char b[8];
+    snprintf(b, sizeof b, "%02X", v);
+    return b;
 }
 
 bool loadFile(const fs::path& p, YAML::Node* out, std::string* err) {
@@ -152,6 +176,12 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
                 *err = "slave.yaml: diagnostic_sdos 条目缺少 index";
                 return false;
             }
+            if (!isValidSdoType(c.type)) {
+                *err = "slave.yaml: diagnostic_sdos 条目 0x" + hex04(c.index) + ":" +
+                       hex02(c.sub) + " (" + c.name + ") 的 type 非法: \"" + c.type +
+                       "\"（合法值: " + kValidSdoTypes + "）";
+                return false;
+            }
             o->slave.diagnostic_sdos.push_back(c);
         }
     }
@@ -195,6 +225,12 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
             c.name  = get<std::string>(a, "name", "");
             c.poll_divisor = get<int>(a, "poll_divisor", 1);
             if (c.poll_divisor < 1) c.poll_divisor = 1;
+            if (!isValidSdoType(c.type)) {
+                *err = "pdo.yaml: async_sdo 条目 0x" + hex04(c.index) + ":" +
+                       hex02(c.sub) + " (" + c.name + ") 的 type 非法: \"" + c.type +
+                       "\"（合法值: " + kValidSdoTypes + "）";
+                return false;
+            }
             o->async_sdos.push_back(c);
         }
     }
