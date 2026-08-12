@@ -128,6 +128,11 @@ class IpcClient(QObject):
         self._retry.timeout.connect(self._try_reconnect)
         self._auto_reconnect = False
 
+        # 线格式是否可信。协议版本不匹配、或 pong 里的 sample_size 与本地
+        # SAMPLE_SIZE 不一致时置 False——此时遥测数据按旧/新布局互相错位
+        # 解读，画出来的曲线比没有数据更危险，必须整体拒收。
+        self._wire_ok = True
+
     # ── 连接 ────────────────────────────────────────────────────────────
     def connect_to(self, path: str, auto_reconnect: bool = True):
         self._path = path
@@ -154,6 +159,7 @@ class IpcClient(QObject):
         return self._sock.state() == QLocalSocket.ConnectedState
 
     def _on_connected(self):
+        self._wire_ok = True             # 新连接，重新做一次线格式校验再信任
         self.connected.emit()
         self.send({"cmd": "ping"})       # 先握手校验线格式
         self.send({"cmd": "get_status"})
@@ -186,6 +192,20 @@ class IpcClient(QObject):
                 self.log_message.emit("ERROR", "IPC 帧同步丢失，已重置接收缓冲")
                 self._buf.clear()
                 return
+            if version != PROTOCOL_VERSION:
+                # 帧头里的协议版本从未被真正比较过（终审 finding I2）——版本不匹配
+                # 意味着往后每一帧都可能是按错误的线格式在解析，不能继续收，
+                # 也不能自动重连（重连只会用同一份不匹配的 Backend 再连一次）。
+                self.log_message.emit(
+                    "ERROR",
+                    f"IPC 协议版本不匹配：Backend 是 v{version}，GUI 期望 v{PROTOCOL_VERSION}。"
+                    "请重新编译使两边一致后再连接，已断开并停止自动重连。")
+                self._wire_ok = False
+                self._auto_reconnect = False
+                self._retry.stop()
+                self._sock.disconnectFromServer()
+                self._buf.clear()
+                return
             total = FRAME_HEADER.size + length
             if len(self._buf) < total:
                 return
@@ -199,6 +219,10 @@ class IpcClient(QObject):
 
     def _handle_telemetry(self, payload: bytes):
         if not payload:
+            return
+        if not self._wire_ok:
+            # 线格式已知不可信（版本不匹配或 pong 里的 sample_size 对不上），
+            # 拒收遥测——按错误布局解析出的曲线比没有曲线更容易骗人。
             return
         if len(payload) % SAMPLE_SIZE != 0:
             self.log_message.emit(
@@ -231,10 +255,11 @@ class IpcClient(QObject):
         elif ev == "pong":
             remote = int(obj.get("sample_size", -1))
             if remote != SAMPLE_SIZE:
+                self._wire_ok = False
                 self.log_message.emit(
                     "ERROR",
                     f"线格式不匹配：Backend 的 Sample 是 {remote} 字节，"
                     f"GUI 期望 {SAMPLE_SIZE} 字节。请重新编译使两边一致，"
-                    "否则曲线数据不可信。")
+                    "否则曲线数据不可信。已拒收后续遥测帧。")
             else:
                 self.handshake_ok.emit(obj)
