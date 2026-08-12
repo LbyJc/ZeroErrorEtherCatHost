@@ -80,7 +80,7 @@ TEST(单生产者单消费者并发不丢不乱序) {
 }
 
 TEST(Sample结构体尺寸锁定) {
-    // GUI 的 struct 格式串按 144 字节写死，这里守住它
-    CHECK_EQ(sizeof(Sample), 144u);
+    // GUI 的 struct 格式串按 184 字节写死（协议 v2，见 test_wire_format.cpp），这里守住它
+    CHECK_EQ(sizeof(Sample), 184u);
     CHECK_EQ(sizeof(FrameHeader), 12u);
 }

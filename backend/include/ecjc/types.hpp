@@ -12,7 +12,7 @@ namespace ecjc {
 
 // ── 帧 ────────────────────────────────────────────────────────────────────
 constexpr uint32_t kFrameMagic = 0x434A4345u;   // 'ECJC' (小端)
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersion = 2;
 
 enum class FrameType : uint16_t {
     Telemetry = 1,     // payload = N × Sample，二进制
@@ -77,7 +77,8 @@ const char* toString(AppState s);
 
 // ── 遥测样本 ──────────────────────────────────────────────────────────────
 // 字段顺序按自然对齐排布（8 字节的在前），保证无内部填充、跨语言布局稳定。
-// Python 对应格式串: "<q14d2i2I2HbBBB"
+// Python 对应格式串: "<q14d8i4I4H2hbBBB" —— 以 gui/ipc_client.py 的 SAMPLE_FORMAT 为准，
+// 两边尺寸不一致时 GUI 连接握手会直接报错。
 struct Sample {
     int64_t  system_time_ns;                  // Unix epoch 纳秒
     double   elapsed_time_s;                  // 从本次采集开始计时
@@ -98,19 +99,32 @@ struct Sample {
 
     int32_t  motor_position_raw;              // 原始计数，必须保留
     int32_t  output_position_raw;
+    int32_t  twist_counts;                    // 0x2241，电机侧计数
+    int32_t  following_error_counts;          // 0x60F4
+    int32_t  torque_est_mNm;                  // 0x3B69
+    int32_t  aux_position_raw;                // 0x20A0
+    int32_t  position_counts_raw;             // 0x6063
+    int32_t  motor_position_sdo;              // 0x2240 异步 SDO 通道（对拍用）
+    uint32_t dc_link_voltage_mV;              // 0x6079
+    uint32_t warning_code;                    // 0x3B68
     uint32_t working_counter;
     uint32_t seq;                             // 单调递增，GUI 用它检测丢包
 
     uint16_t controlword;
     uint16_t statusword;
+    uint16_t error_code;                      // 0x603F
+    uint16_t temperature_drive_C;             // 0x22A2。⚠ 驱动器温度，非绕组非壳体；
+                                               //   异步 SDO，采样时刻与本样本不同步
+    int16_t  torque_actual_permille;          // 0x6077 原始千分比
+    int16_t  torque_ratio;                    // 0x3B6A
 
     int8_t   operation_mode;                  // 0x6061 实际值
     uint8_t  cia402_state;                    // Cia402State
     uint8_t  ethercat_state;                  // EcState
     uint8_t  flags;                           // bit0 running, bit1 recording, bit2 fault
 };
-static_assert(sizeof(Sample) == 144,
-              "Sample 布局变了！同步更新 gui/ipc_client.py 的 SAMPLE_FORMAT");
+static_assert(sizeof(Sample) == 184,
+              "Sample 布局变了！同步更新 gui/ipc_client.py 的 SAMPLE_FORMAT 与 kProtocolVersion");
 static_assert(offsetof(Sample, motor_position_raw) == 120, "Sample 布局意外填充");
 
 constexpr uint8_t kFlagRunning   = 0x01;
@@ -131,6 +145,15 @@ struct RawIo {
     int16_t  current_actual  = 0;   // 0x6078
     uint32_t warning_code    = 0;   // 0x3B68
     int32_t  motor_position  = 0;   // 0x2240，异步 SDO 取得
+    int32_t  vendor_torque   = 0;   // 0x3B69，mNm（此前已映射进 PDO 但从未读取）
+    int16_t  torque_ratio    = 0;   // 0x3B6A（同上）
+    int32_t  twist_counts    = 0;   // 0x2241，电机侧 17 位计数
+    int32_t  following_error = 0;   // 0x60F4
+    uint32_t dc_link_mV      = 0;   // 0x6079
+    uint16_t drive_temp_C    = 0;   // 0x22A2，异步 SDO，与 PDO 不同步
+    int32_t  motor_position_sdo = 0;// 0x2240 的异步 SDO 通道，J3 对拍专用。
+                                    // 必须与 motor_position（PDO 通道）分开，
+                                    // 否则两个写入者竞争同一字段，值会抖动
     // 输出
     int32_t  target_position = 0;   // 0x607A
     int32_t  target_velocity = 0;   // 0x60FF
