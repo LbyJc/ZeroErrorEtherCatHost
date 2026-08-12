@@ -12,6 +12,18 @@ TEST(sample_has_no_internal_padding) {
     CHECK(offsetof(Sample, controlword) % 2 == 0);
 }
 
+// 终审 finding M2：只做"能整除"的弱校验挡不住字段被插队/换位——只要新位置
+// 仍然是 4 的倍数就能悄悄溜过上面那条测试。这里钉死三个分组边界的绝对偏移
+// （8 字节量 14 个 = 8+14*8=120，随后 8 个 int32/uint32 各组 = 120+8*4+4*4=168，
+// 随后 4 个 u16/i16 = 168+4*2=176，再 2 个 i16 = 176+2*2=180），
+// 由编译器实测（g++ 13, x86_64，自然对齐无 pragma pack）确认，如目标平台不同
+// 需以实测值为准。
+TEST(sample_field_offsets_pinned) {
+    CHECK_EQ((int)offsetof(Sample, controlword), 168);
+    CHECK_EQ((int)offsetof(Sample, torque_actual_permille), 176);
+    CHECK_EQ((int)offsetof(Sample, operation_mode), 180);
+}
+
 TEST(protocol_version_bumped_for_new_layout) {
     CHECK_EQ((int)kProtocolVersion, 2);
 }
