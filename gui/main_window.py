@@ -17,6 +17,7 @@ from ipc_client import IpcClient
 from widgets.cia402_panel import Cia402Panel
 from widgets.config_panel import ConfigPanel
 from widgets.data_record_panel import DataRecordPanel
+from widgets.experiment_panel import ExperimentPanel
 from widgets.live_panel import LivePanel
 from widgets.log_panel import LogPanel
 from widgets.mode_panel import ModePanel
@@ -45,6 +46,8 @@ class MainWindow(QMainWindow):
         self._backend_proc = None
         self._pending_cmd = None
         self._perm_warned = False
+        self._last_rec_file = ""
+        self._last_rec_samples = ""
 
         self.setWindowTitle(
             f"{cfg.app.get('name', 'EtherCAT Joint Control')} "
@@ -61,6 +64,7 @@ class MainWindow(QMainWindow):
         self.system_panel = SystemPanel(cfg)
         self.cia_panel = Cia402Panel(cfg)
         self.mode_panel = ModePanel(cfg)
+        self.experiment_panel = ExperimentPanel()
         self.live_panel = LivePanel(cfg)
         self.plot_panel = PlotPanel(cfg)
 
@@ -71,9 +75,15 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.cia_panel)
         left_scroll = _scroll(left)
 
+        mid = QWidget()
+        ml = QVBoxLayout(mid)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.addWidget(self.experiment_panel)
+        ml.addWidget(self.mode_panel)
+
         cols = QSplitter(Qt.Horizontal)
         cols.addWidget(left_scroll)
-        cols.addWidget(_scroll(self.mode_panel))
+        cols.addWidget(_scroll(mid))
         cols.addWidget(_scroll(self.live_panel))
         cols.setSizes([380, 420, 340])
 
@@ -108,8 +118,9 @@ class MainWindow(QMainWindow):
 
         # ── 信号连接 ────────────────────────────────────────────────
         for p in (self.system_panel, self.cia_panel, self.mode_panel,
-                  self.param_panel, self.record_panel):
+                  self.param_panel, self.record_panel, self.experiment_panel):
             p.command.connect(self._send)
+        self.experiment_panel.finished.connect(self._on_experiment_finished)
 
         self.ipc.connected.connect(self._on_connected)
         self.ipc.disconnected.connect(self._on_disconnected)
@@ -248,6 +259,9 @@ class MainWindow(QMainWindow):
         # cia_panel 同理：_running 若不复位，运行中断连会冻结在 True。
         self.system_panel.set_disconnected()
         self.cia_panel.set_disconnected()
+        # experiment_panel 同理：record_start 已发、ack 还没回来时断连，
+        # _awaiting_line 不复位就永久卡住两个一键按钮（复审发现的破坏 #1）。
+        self.experiment_panel.on_disconnected()
         self.top.update_status(_EMPTY_STATUS)
 
     def _on_connect_failed(self, why: str):
@@ -280,6 +294,7 @@ class MainWindow(QMainWindow):
         self.cia_panel.update_status(st)
         self.mode_panel.update_status(st)
         self.record_panel.update_status(st)
+        self.experiment_panel.update_status(st)
 
     def _on_telemetry(self, arr):
         self.plot_panel.append(arr)
@@ -302,13 +317,56 @@ class MainWindow(QMainWindow):
     def _on_recording(self, rec):
         self.record_panel.update_recording(rec)
         self.top.update_recording(rec)
+        # 一键实验结束时导 CSV 要用这份 h5 路径；record_stop 后 recording
+        # 事件仍会带着最后一次落盘的 file/samples，所以这里只缓存，不清空。
+        f = rec.get("file", "")
+        if f:
+            self._last_rec_file = f
+            self._last_rec_samples = rec.get("samples", "")
+
+    def _on_experiment_finished(self, line: str, meta: dict):
+        """一键实验面板点【结束】后触发：线 B 自动导 A.1 CSV，然后弹汇总框。"""
+        from widgets.experiment_dialog import SummaryDialog
+
+        h5_path = self._last_rec_file
+        info = {"h5_path": h5_path, "samples": self._last_rec_samples}
+        if line == "B" and h5_path:
+            try:
+                sys.path.insert(0, os.path.join(self.cfg.root, "tools"))
+                import h5_to_csv
+                import experiment_naming as en
+
+                csv_name = en.csv_filename(
+                    meta["sample_id"], meta["life_hours"], meta["test_item"],
+                    meta["load_percent_Tr"], meta["speed_rpm_target"], meta["rep"])
+                csv_path = os.path.join(meta["out_dir"], csv_name)
+                h5_to_csv.export_a1(h5_path, csv_path)
+                info["csv_path"] = csv_path
+            except Exception as e:
+                info["csv_path"] = None
+                info["error"] = f"CSV 导出失败: {e}"
+        elif line == "B" and not h5_path:
+            info["csv_path"] = None
+            info["error"] = "未找到本次录制的 HDF5 路径，跳过 CSV 导出。"
+        SummaryDialog(info, self).exec()
 
     def _on_ack(self, cmd, ok, msg):
+        # I3（spec §5）：record_start 可能被后端拒绝（磁盘不足等），一键面板要
+        # 靠这个 ack 决定发不发 start_run，不能发了 record_start 就当已经开始。
+        # on_record_ack 返回 True 表示这条 record_start 确实是一键面板发起、
+        # 已经弹过一次"记录未能启动"——下面通用失败弹框要跳过它，否则弹两个框
+        # （复审发现的破坏 #2）。手动 record_panel 触发的 record_start 不经过
+        # 一键面板的等待态，on_record_ack 返回 False，通用弹框照常弹，不受影响。
+        handled_by_experiment_panel = False
+        if cmd == "record_start":
+            handled_by_experiment_panel = self.experiment_panel.on_record_ack(ok, msg)
         if ok:
             return
         # 失败必须给人话原因（任务书第四十三节），而且要显眼
         self.log_panel.append("ERROR", f"{cmd} 失败: {msg}")
         self.statusBar().showMessage(f"{cmd} 失败: {msg}", 8000)
+        if handled_by_experiment_panel:
+            return
         if cmd in ("connect_bus", "reconnect", "servo_enable", "start_run",
                    "record_start", "reset_load_encoder", "homing"):
             QMessageBox.warning(self, f"{cmd} 失败", msg or "未提供原因")

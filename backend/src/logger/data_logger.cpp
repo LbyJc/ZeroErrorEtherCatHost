@@ -98,7 +98,8 @@ bool DataLogger::start(const RecordingMeta& meta, std::string* err) {
     meta_ = meta;
     meta_.start_time = nowString();
 
-    const double free_gb = diskFreeGb(cfg_.app.data_dir);
+    // out_dir 可能指向另一块盘，磁盘余量得查它实际要落盘的目录，不能查错盘
+    const double free_gb = diskFreeGb(recordingTargetDir(meta_.out_dir, cfg_.app.data_dir));
     if (free_gb >= 0 && free_gb < min_free_gb_) {
         *err = "磁盘剩余空间仅 " + std::to_string(free_gb) +
                " GB，低于安全阈值 " + std::to_string(min_free_gb_) + " GB，拒绝开始采集";
@@ -140,12 +141,13 @@ RecordingStatus DataLogger::status() const {
 }
 
 bool DataLogger::openFile(std::string* err) {
+    const std::string target_dir = recordingTargetDir(meta_.out_dir, cfg_.app.data_dir);
     std::error_code ec;
-    fs::create_directories(cfg_.app.data_dir, ec);
+    fs::create_directories(target_dir, ec);
 
     std::string base = meta_.test_name.empty() ? "exp" : meta_.test_name;
     for (auto& c : base) if (c == '/' || c == ' ') c = '_';
-    cur_path_ = (fs::path(cfg_.app.data_dir) /
+    cur_path_ = (fs::path(target_dir) /
                  (base + "_" + fileStamp() + ".h5")).string();
 
     impl_->file = H5Fcreate(cur_path_.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
@@ -225,6 +227,27 @@ bool DataLogger::openFile(std::string* err) {
     for (const auto& kv : meta_.diagnostics) {
         if (kv.second == INT64_MIN) attrStr(("sdo_" + kv.first).c_str(), "read_failed");
         else                        attrDbl(("sdo_" + kv.first).c_str(), (double)kv.second);
+    }
+
+    // ── P2 实验元数据（一键按钮传入；哨兵值表示未提供，不写对应 attr）───
+    if (!meta_.sample_id.empty())       attrStr("sample_id", meta_.sample_id);
+    if (!meta_.baseline_stage.empty())  attrStr("baseline_stage", meta_.baseline_stage);
+    if (meta_.life_hours >= 0)          attrDbl("life_hours", meta_.life_hours);
+    if (!meta_.test_item.empty())       attrStr("test_item", meta_.test_item);
+    if (meta_.rep >= 0)                 attrDbl("rep", meta_.rep);
+    if (meta_.load_percent_Tr >= 0)     attrDbl("load_percent_Tr", meta_.load_percent_Tr);
+    if (meta_.load_torque_Nm_target >= 0) attrDbl("load_torque_Nm_target", meta_.load_torque_Nm_target);
+    if (meta_.speed_rpm_target >= 0)    attrDbl("speed_rpm_target", meta_.speed_rpm_target);
+    if (!meta_.operator_name.empty())   attrStr("operator", meta_.operator_name);
+    if (!meta_.exp_notes.empty())       attrStr("notes", meta_.exp_notes);
+    // 三个留空列在 metadata 注明未采集原因——但只在这确实是一次线 B 实验采集时写
+    // （sample_id 非空即视为一键实验流程）。旧 record_panel 手动采集不带实验字段，
+    // 给它也无条件塞这三条只对 A.1 CSV 有意义的说明，是纯噪声（终审 finding M5）。
+    if (!meta_.sample_id.empty()) {
+        attrStr("temperature_joint_C_note", "外部传感器，未采集");
+        attrStr("temperature_motor_C_note", "总线无绕组温度，未采集");
+        attrStr("load_torque_Nm_actual_note",
+                "外部转矩传感器，未采集；0x3B69 是关节自估传递转矩，语义不同");
     }
 
     // ── 建列 ───────────────────────────────────────────────────────
@@ -390,7 +413,7 @@ void DataLogger::threadMain() {
             last_flush = now;
 
             std::lock_guard<std::mutex> lk(st_mu_);
-            st_.disk_free_gb = diskFreeGb(cfg_.app.data_dir);
+            st_.disk_free_gb = diskFreeGb(recordingTargetDir(meta_.out_dir, cfg_.app.data_dir));
             std::error_code ec;
             st_.bytes = fs::exists(cur_path_) ? fs::file_size(cur_path_, ec) : 0;
             if (st_.disk_free_gb >= 0 && st_.disk_free_gb < min_free_gb_) {

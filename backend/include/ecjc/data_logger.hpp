@@ -39,6 +39,19 @@ struct RecordingMeta {
     std::string start_time;
     std::string end_time;
 
+    // ── P2 实验元数据（一键按钮填充；空则不写对应 attr）──────────────
+    std::string sample_id;
+    std::string baseline_stage;   // continuous_run / life_node / formal_0h
+    double      life_hours = -1;   // <0 表示未提供（线 A 本期不数循环）
+    std::string test_item;        // 受控词表，见 experiment_naming.py
+    int         rep = -1;
+    double      load_percent_Tr = -1;
+    double      load_torque_Nm_target = -1;
+    double      speed_rpm_target = -1;
+    std::string operator_name;
+    std::string exp_notes;
+    std::string out_dir;          // 落盘目录覆盖；空则用 cfg_.app.data_dir
+
     // ── Task 13：数据能绑回代码版本与驱动器标定状态 ──────────────────
     std::string git_commit;      ///< main.cpp 用 CMake 注入的宏填充；非 git 构建环境降级为 "unknown"
     std::string config_sha256;   ///< config/ 目录下全部 yaml 拼接后的 sha256，启动时算一次
@@ -46,6 +59,12 @@ struct RecordingMeta {
     /// 读失败的条目值为 INT64_MIN，写 metadata 时转成 "read_failed" 字符串属性。
     std::map<std::string, int64_t> diagnostics;
 };
+
+/// 落盘目录：out_dir 非空则用它，否则用默认 data_dir。
+inline std::string recordingTargetDir(const std::string& out_dir,
+                                      const std::string& default_dir) {
+    return out_dir.empty() ? default_dir : out_dir;
+}
 
 struct RecordingStatus {
     bool     active = false;

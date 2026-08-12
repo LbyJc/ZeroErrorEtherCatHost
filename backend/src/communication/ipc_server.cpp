@@ -874,6 +874,17 @@ void IpcServer::handleLine(const std::string& line) {
             ps << "}";
             m.control_params_json = ps.str();
         }
+        m.sample_id             = j.str("sample_id", "");
+        m.baseline_stage        = j.str("baseline_stage", "");
+        m.life_hours            = j.dbl("life_hours", -1);
+        m.test_item             = j.str("test_item", "");
+        m.rep                   = (int)j.dbl("rep", -1);
+        m.load_percent_Tr       = j.dbl("load_percent_Tr", -1);
+        m.load_torque_Nm_target = j.dbl("load_torque_Nm_target", -1);
+        m.speed_rpm_target      = j.dbl("speed_rpm_target", -1);
+        m.operator_name         = j.str("operator", "");
+        m.exp_notes             = j.str("notes", "");
+        m.out_dir               = j.str("out_dir", "");
         ok = logger_->start(m, &err);
         if (ok) {
             rt_->setRecordEpoch(std::chrono::duration_cast<std::chrono::nanoseconds>(
