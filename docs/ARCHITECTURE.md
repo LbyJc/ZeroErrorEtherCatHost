@@ -557,9 +557,9 @@ ethercat_joint_control/
 |---|---|---|
 | Vendor ID / Product Code | `0x5a65726f` / `0x00029252` | `ethercat slaves -v` |
 | 网卡 / 周期 | `enp3s0` / 1000 µs | 现场 |
-| Rx PDO | `0x1609`（控制字/最大力矩/目标位置/目标速度/运行模式） | ESI V3.2.0 |
-| Tx PDO | `0x1A06`+`0x1A07`+`0x1A0D`+`0x1A1F`+`0x1A08` | ESI，`0x1A05` 之后无 Exclude 可叠加 |
-| 电机侧位置 | `0x2240`（**不在任何 PDO 里，只能异步 SDO**） | ESI |
+| Rx PDO | `0x1605`（目标位置/目标速度/目标力矩/最大力矩/控制字/运行模式） | ESI V3.2.0（此前这里误写成 `0x1609`——`0x1609` 缺 0x6071 目标力矩，CST 模式没法用，已改用 `0x1605`） |
+| Tx PDO | `0x1A06`+`0x1A07`+`0x1A0D`+`0x1A1F`+`0x1A08`+`0x1A18`+`0x1A19` | ESI，`0x1A05` 之后无 Exclude 可叠加 |
+| 电机侧位置 | `0x2240`（**不在任何预定义 PDO 里，默认走异步 SDO**；Task 15 放开 `0x1A00` 后经重映射进入 PDO，见 `config/pdo.yaml` 的 `0x1A00` 段） | ESI |
 | 输出侧位置 | `0x20A0` | ESI |
 | 电机侧分辨率 | 131072 counts/rev (2^17) | 实测反推 |
 | 输出侧分辨率 | 524288 counts/rev (2^19) | **物理转角实测确认**（半圈法，见下） |
@@ -567,6 +567,12 @@ ethercat_joint_control/
 | 额定电流 / 力矩 | 6300 mA / 31000 mNm | `0x6075` / `0x6076` |
 | `0x60FF` 单位 | `0x6064` 的 counts/s，`velocity_gain_correction` 现为 1.0（未应用任何实测速度标定；此前"增益 1.0006"是跟随误差与减速比推算的混合产物，不是单位标定） | 实测，100 rpm 电机侧 ↔ 7207 |
 | 支持模式 | `0x6502`=0x38D：pp/pv/tq/csp/csv/cst，**无 Homing** | SDO |
+
+Backend↔GUI 的 IPC 线格式：协议版本 `kProtocolVersion` = **2**（帧头里的 `version` 与
+GUI 的 `PROTOCOL_VERSION` 逐帧比对，不一致直接断连并停止自动重连）；`Sample` 结构体
+`sizeof` = **184 字节**（`backend/include/ecjc/types.hpp`，与 `gui/ipc_client.py` 的
+`SAMPLE_FORMAT` 逐字段对应，连接握手时用 pong 的 `sample_size` 再核一次）；HDF5 落盘
+按 `ECJC_SAMPLE_COLUMNS` 这一份宏展开建列，共 **37 列**（`backend/include/ecjc/data_logger.hpp`）。
 
 **输出侧分辨率的验证方法（半圈法）**：两侧编码器都是 32 位累加多圈量，
 不会在一圈处回绕，所以拿不到回绕模数，只能靠物理转角实测。
