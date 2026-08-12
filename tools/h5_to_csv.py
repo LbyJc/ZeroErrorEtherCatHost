@@ -8,11 +8,55 @@ CSV 只作为导出格式。支持按时间区间和字段子集导出，
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from pathlib import Path
 
 import h5py
 import numpy as np
+import yaml
+
+
+def export_a1(h5path, out_csv):
+    """按 A.1 列顺序导出 CSV(含三个留空列写空字段) + 同名 .meta.yaml。
+
+    列 = A.1 公共字段(含留空列) + 扩展列(HDF5 里有、但不在 A.1 的，排序保证确定性)。
+    per-file 常量(HDF5 group attrs)逐行重复写入；逐样本量取 dataset；
+    留空列/缺失量写空字段(不是 "NA")。
+    返回 out_csv。
+    """
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gui"))
+    import experiment_naming as en
+
+    with h5py.File(h5path, "r") as f:
+        g = f["experiment"]
+        present = set(g.keys())
+        n = len(g["elapsed_time_s"])
+        ext = [k for k in present if k not in en.A1_COLUMNS]
+        cols = en.A1_COLUMNS + sorted(ext)
+        attrs = {k: g.attrs[k] for k in g.attrs}
+
+        with open(out_csv, "w", newline="") as fp:
+            w = csv.writer(fp)
+            w.writerow(cols)
+            for i in range(n):
+                row = []
+                for c in cols:
+                    if c in present:
+                        row.append(g[c][i])
+                    elif c in attrs:
+                        row.append(attrs[c])  # per-file 常量逐行重复
+                    else:
+                        row.append("")  # 留空列 / 未采集量
+                w.writerow(row)
+
+    calib = {k: (float(v) if isinstance(v, (int, float, np.floating)) else str(v))
+             for k, v in attrs.items()}
+    meta_path = os.path.splitext(out_csv)[0] + ".meta.yaml"
+    with open(meta_path, "w") as fp:
+        yaml.safe_dump(en.meta_yaml_dict(calib), fp, allow_unicode=True, sort_keys=False)
+    return out_csv
 
 
 def main() -> int:
@@ -25,12 +69,21 @@ def main() -> int:
     ap.add_argument("--decimate", type=int, default=1,
                     help="抽稀倍数，例如 10 表示每 10 个样本取 1 个")
     ap.add_argument("--list", action="store_true", help="只列出字段与 metadata")
+    ap.add_argument("--a1", action="store_true",
+                    help="按附录 A.1 列序导出(含留空列)，并写同名 .meta.yaml")
     args = ap.parse_args()
 
     p = Path(args.h5file)
     if not p.is_file():
         print(f"文件不存在: {p}", file=sys.stderr)
         return 1
+
+    if args.a1:
+        out = Path(args.output) if args.output else p.with_suffix(".csv")
+        export_a1(str(p), str(out))
+        print(f"已按 A.1 列序导出 → {out}")
+        print(f"metadata → {out.with_suffix('.meta.yaml')}")
+        return 0
 
     with h5py.File(p, "r") as h:
         g = h["/experiment"]
