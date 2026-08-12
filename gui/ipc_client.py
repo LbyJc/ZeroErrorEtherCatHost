@@ -19,10 +19,20 @@ FRAME_MAGIC = 0x434A4345  # 'ECJC'
 FRAME_HEADER = struct.Struct("<IHHI")  # magic, type, version, length
 FRAME_TELEMETRY = 1
 FRAME_JSON = 2
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
-# 遥测样本：与 C++ Sample 一一对应
-SAMPLE_FORMAT = "<q14d2i2I2HbBBB"
+# 遥测样本：与 C++ Sample（backend/include/ecjc/types.hpp）逐字段一一对应。
+# 分组按 C++ 实际布局（8 字节 -> 4 字节 -> 2 字节 -> 1 字节），逐段核对过 offsetof：
+#   q   : system_time_ns
+#   14d : elapsed_time_s .. velocity_error_rpm
+#   8i  : motor_position_raw, output_position_raw, twist_counts,
+#         following_error_counts, torque_est_mNm, aux_position_raw,
+#         position_counts_raw, motor_position_sdo
+#   4I  : dc_link_voltage_mV, warning_code, working_counter, seq
+#   4H  : controlword, statusword, error_code, temperature_drive_C
+#   2h  : torque_actual_permille, torque_ratio
+#   bBBB: operation_mode, cia402_state, ethercat_state, flags
+SAMPLE_FORMAT = "<q14d8i4I4H2hbBBB"
 SAMPLE = struct.Struct(SAMPLE_FORMAT)
 SAMPLE_SIZE = SAMPLE.size
 
@@ -33,8 +43,12 @@ SAMPLE_FIELDS = [
     "motor_current_A", "actual_torque_Nm",
     "target_position_deg", "target_velocity_rpm", "target_torque_Nm",
     "position_error_deg", "velocity_error_rpm",
-    "motor_position_raw", "output_position_raw", "working_counter", "seq",
-    "controlword", "statusword",
+    "motor_position_raw", "output_position_raw",
+    "twist_counts", "following_error_counts", "torque_est_mNm",
+    "aux_position_raw", "position_counts_raw", "motor_position_sdo",
+    "dc_link_voltage_mV", "warning_code", "working_counter", "seq",
+    "controlword", "statusword", "error_code", "temperature_drive_C",
+    "torque_actual_permille", "torque_ratio",
     "operation_mode", "cia402_state", "ethercat_state", "flags",
 ]
 
@@ -51,13 +65,19 @@ SAMPLE_DTYPE = np.dtype([
     ("target_torque_Nm", "<f8"),
     ("position_error_deg", "<f8"), ("velocity_error_rpm", "<f8"),
     ("motor_position_raw", "<i4"), ("output_position_raw", "<i4"),
+    ("twist_counts", "<i4"), ("following_error_counts", "<i4"),
+    ("torque_est_mNm", "<i4"), ("aux_position_raw", "<i4"),
+    ("position_counts_raw", "<i4"), ("motor_position_sdo", "<i4"),
+    ("dc_link_voltage_mV", "<u4"), ("warning_code", "<u4"),
     ("working_counter", "<u4"), ("seq", "<u4"),
     ("controlword", "<u2"), ("statusword", "<u2"),
+    ("error_code", "<u2"), ("temperature_drive_C", "<u2"),
+    ("torque_actual_permille", "<i2"), ("torque_ratio", "<i2"),
     ("operation_mode", "i1"), ("cia402_state", "u1"),
     ("ethercat_state", "u1"), ("flags", "u1"),
 ])
 
-assert SAMPLE_DTYPE.itemsize == SAMPLE_SIZE == 144, (
+assert SAMPLE_DTYPE.itemsize == SAMPLE_SIZE == 184, (
     f"线格式不一致: dtype={SAMPLE_DTYPE.itemsize} struct={SAMPLE_SIZE}，"
     "请同步检查 types.hpp 的 Sample 定义"
 )
