@@ -213,6 +213,14 @@ bool DataLogger::openFile(std::string* err) {
             "theta_twist = theta_out - theta_in/i（与计划§4.4 TE 同号）");
     attrStr("git_commit",   meta_.git_commit);
     attrStr("config_sha256", meta_.config_sha256);
+    // 终审 finding I3：sm_in_* 系列诊断 SDO（0x1C33 相关）是 activate **之前**
+    // 读的（PreActivate 相位），而映射写入发生在 activate 之后的 PREOP→SAFEOP
+    // 迁移里——所以这些值反映的是上一次会话的映射与累计计数，不是本次采集期间
+    // 的实况。本次会话真正的 SM 时序，运行中用 tools/verify_pdo_remap.py 的 J6
+    // 现场读取（那条路径在 OP 状态下问 0x1C33，读到的才是当次会话的数）。
+    attrStr("sm_diagnostics_scope",
+            "activate 前快照：反映上一次会话的映射与累计计数，非本次采集期间；"
+            "本次会话的 SM 时序用 tools/verify_pdo_remap.py 的 J6 在运行中读取");
     // 全部诊断 SDO 实读值（activate 前一次性读，见 IEtherCATBus::diagnostics()）
     for (const auto& kv : meta_.diagnostics) {
         if (kv.second == INT64_MIN) attrStr(("sdo_" + kv.first).c_str(), "read_failed");
@@ -311,10 +319,12 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
 #undef COL_U8
 #undef COL_I8
 
-    // 运行期真校验：k 是宏链实际展开并成功写出的列数。若 ECJC_SAMPLE_COLUMNS
-    // 的某个 X 分支被改动导致漏展开/重复展开某个 tag（例如手滑删了一行、
-    // COL_##tag 拼错成不存在的宏名之外的另一个已存在宏名），编译期不会报错，
-    // 但这里会当场抓到——不能指望单元测试覆盖每一种展开错误的组合。
+    // 运行期校验（终审 finding M1，如实描述）：防的是"建列部分失败的错位"——
+    // openFile() 里 kCols[] 的某一列 H5Dcreate2 失败时会立刻 return false，
+    // impl_->cols 因此可能只建到半途；这里检查本批 X-macro 实际写出的列数 k
+    // 是否等于 impl_->cols.size()，能在这种"建列表比预期短"的情形下挡住
+    // 错位写入，而不是宣称能捕获宏被改动的每一种展开错误组合——那种情形下
+    // COL_##tag 多半直接是编译错误，轮不到这里来查。
     if (k != impl_->cols.size()) {
         *err = "列写入数与建列数不一致：写了 " + std::to_string(k) +
                " 列，应为 " + std::to_string(impl_->cols.size()) +
@@ -335,10 +345,6 @@ size_t sampleColumnCount() {
 #undef X
     return c;
 }
-
-// 与 sampleColumnCount() 用的是同一份宏展开——数量恒等由编译期保证，
-// 不是两处手写数字凑巧一致。
-size_t sampleWriterCount() { return sampleColumnCount(); }
 
 std::vector<std::string> sampleColumnNames() {
     std::vector<std::string> v;

@@ -105,8 +105,6 @@ struct RecordingStatus {
 
 /// 列总数（等于 kCols[] 的元素个数）
 size_t sampleColumnCount();
-/// 写入序列实际写出的列数——与 sampleColumnCount() 用同一份宏展开，恒等
-size_t sampleWriterCount();
 /// 按建列顺序返回列名
 std::vector<std::string> sampleColumnNames();
 
