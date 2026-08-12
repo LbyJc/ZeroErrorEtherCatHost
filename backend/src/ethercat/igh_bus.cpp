@@ -17,6 +17,7 @@
 
 #include <ecrt.h>
 
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <map>
@@ -94,6 +95,13 @@ public:
         }
         rep("PDO Configured", true, "");
 
+        // off_ 此刻已经填好（buildPdos 里最后一步就是填它）。
+        // Task 14 前 PDO 里没有这两个字段，标志为 false，异步 SDO 通道
+        // 继续兼任主链路；Task 14 只改 pdo.yaml 加映射，这两个标志自动翻转，
+        // 不用再碰这段代码——这就是"配置驱动的自动切换"。
+        motor_position_in_pdo_ = off_.count("motor_position") > 0;
+        twist_in_pdo_ = off_.count("twist_counts") > 0;
+
         // ── 4. 分布式时钟 ────────────────────────────────────────────
         if (cfg.ethercat.dc_enabled) {
             const uint32_t cycle_ns = cfg.ethercat.cycle_us * 1000u;
@@ -130,8 +138,14 @@ public:
 
         // ── 6. 异步 SDO 请求（0x2240 电机侧位置只能这么读）────────────
         for (const auto& a : cfg.async_sdos) {
+            // 未识别的 type 字符串回落到 4 字节（i32/s32）：config.cpp 里
+            // async_sdo 的默认值本身就是 "i32"，这条回落只会在配置写错
+            // type 时触发；读取端（pollAsyncSdo）用同一张表回落到
+            // EC_READ_S32，size 与读宏两边保持一致，不会越界读。
+            const size_t sz = (a.type == "u8"  || a.type == "i8")  ? 1
+                             : (a.type == "u16" || a.type == "i16") ? 2 : 4;
             ec_sdo_request_t* r = ecrt_slave_config_create_sdo_request(
-                sc_, a.index, a.sub, 4);
+                sc_, a.index, a.sub, sz);
             if (!r) {
                 *err = "创建异步 SDO 请求失败: 0x" + toHex(a.index);
                 return false;
@@ -240,6 +254,8 @@ public:
         pdos_rx_.clear();
         pdos_tx_.clear();
         std::memset(offsets_, 0, sizeof offsets_);
+        motor_position_in_pdo_ = false;
+        twist_in_pdo_ = false;
     }
 
     void receive() override {
@@ -304,8 +320,35 @@ public:
             if (cycle % static_cast<uint64_t>(a.cfg.poll_divisor) != 0) continue;
             switch (ecrt_sdo_request_state(a.req)) {
                 case EC_REQUEST_SUCCESS: {
-                    const int32_t v = EC_READ_S32(ecrt_sdo_request_data(a.req));
-                    if (a.cfg.name == "motor_position") io->motor_position = v;
+                    const uint8_t* d = ecrt_sdo_request_data(a.req);
+                    int64_t v = 0;
+                    // 与 configure() 里建请求的尺寸表同源：未识别的 type
+                    // 字符串回落到 EC_READ_S32，和建请求时的 4 字节回落一致。
+                    if      (a.cfg.type == "u8")  v = EC_READ_U8(d);
+                    else if (a.cfg.type == "i8")  v = EC_READ_S8(d);
+                    else if (a.cfg.type == "u16") v = EC_READ_U16(d);
+                    else if (a.cfg.type == "i16") v = EC_READ_S16(d);
+                    else if (a.cfg.type == "u32") v = EC_READ_U32(d);
+                    else                          v = EC_READ_S32(d);
+
+                    // 表驱动分派。名字来自 pdo.yaml，加对象只改配置 + 这张表。
+                    if (a.cfg.name == "motor_position") {
+                        io->motor_position_sdo = static_cast<int32_t>(v);  // 独立通道，
+                                                                            // J3 对拍专用
+                        // Task 14 完成前 PDO 里还没有 0x2240，主链路仍依赖 SDO 值；
+                        // motor_position_in_pdo_ 一旦（Task 14 后）因 pdo.yaml 变化
+                        // 而置位，这行自动不再执行，不需要再改这段代码。
+                        if (!motor_position_in_pdo_)
+                            io->motor_position = static_cast<int32_t>(v);
+                    } else if (a.cfg.name == "dual_encoder_diff") {
+                        // 同样的模式：Task 14 后若 0x2241 也进了 PDO，
+                        // readInputs 会填 twist_counts，这里让开，避免两个
+                        // 写入者互相覆盖。
+                        if (!twist_in_pdo_)
+                            io->twist_counts = static_cast<int32_t>(v);
+                    } else if (a.cfg.name == "drive_temperature") {
+                        io->drive_temp_C = static_cast<uint16_t>(v);
+                    }
                     ecrt_sdo_request_read(a.req);
                     break;
                 }
@@ -313,7 +356,16 @@ public:
                     ecrt_sdo_request_read(a.req);
                     break;
                 case EC_REQUEST_ERROR:
-                    a.errors++;
+                    ++a.errors;
+                    // 限频：只在第一次失败、以及此后每 1000 次失败时打一条日志，
+                    // 避免总线故障期间刷屏。RT 循环里这条路径极少走到
+                    // （正常情况下 EC_REQUEST_ERROR 几乎不出现），可以接受。
+                    if (a.errors == 1 || a.errors % 1000 == 0) {
+                        std::fprintf(stderr,
+                            "[WARNING] 异步 SDO 0x%04X (%s) 读取失败 %llu 次\n",
+                            a.cfg.index, a.cfg.name.c_str(),
+                            static_cast<unsigned long long>(a.errors));
+                    }
                     ecrt_sdo_request_read(a.req);
                     break;
                 default:   // EC_REQUEST_BUSY：本拍不动，绝不等待
@@ -346,6 +398,7 @@ public:
             s.wc_state = static_cast<int>(ds.wc_state);
         }
         s.dc_ok = cfg_.ethercat.dc_enabled;
+        for (const auto& a : async_) s.async_sdo_errors += a.errors;
         return s;
     }
 
@@ -496,6 +549,11 @@ private:
     std::vector<std::string> names_;
     std::map<std::string, unsigned int> off_;
     std::vector<AsyncReq> async_;
+
+    // Task 14 之前恒为 false：PDO 里还没有这两个字段，异步 SDO 通道
+    // 兼任主链路。构造时机见 configure()：buildPdos() 填完 off_ 之后立即置位。
+    bool motor_position_in_pdo_ = false;
+    bool twist_in_pdo_ = false;
 };
 
 }  // namespace

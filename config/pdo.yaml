@@ -64,5 +64,13 @@ pdo:
 # 因此用 ecrt_slave_config_create_sdo_request() 建异步请求，在 RT 循环里非阻塞轮询。
 # 代价：它的采样时刻与 PDO 不同步，短窗口内会有偏移——标定时窗口要取长（≥30s）。
 async_sdo:
-  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position, poll_divisor: 1}
+  # 0x2240 在 Task 14 之后会进 PDO；这条通道保留作 J3 对拍用（写入 motor_position_sdo）。
+  # poll_divisor 从 1 改到 10：Task 14 前它还兼任主链路（填 motor_position），
+  # 但对拍精度不需要每拍都问一次，10 拍一次足够、也给其余异步 SDO 让带宽。
+  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position,    poll_divisor: 10}
   - {index: 0x2241, sub: 0x00, type: i32, name: dual_encoder_diff, poll_divisor: 100}
+  # 0x22A2 在 ESI 里没有 PdoMapping 标志，只能走 SDO。
+  # ⚠ 这是驱动器温度，不是绕组温度、更不是关节壳体温度。
+  #   采样时刻与 PDO 不同步。1 kHz 下 poll_divisor=1000 即 1 Hz，
+  #   正好压在实验计划 §4.2 温度最低采样率上。
+  - {index: 0x22A2, sub: 0x00, type: u16, name: drive_temperature, poll_divisor: 1000}

@@ -31,6 +31,9 @@ struct BusStatus {
     int      wc_state = 0;          // 0=ZERO 1=INCOMPLETE 2=COMPLETE
     bool     dc_ok = false;
     uint64_t lost_frames = 0;
+    /// 所有异步 SDO 请求（0x2240/0x2241/0x22A2...）累计的失败次数之和。
+    /// 逐个对象的计数仍在 IghBus::AsyncReq 里；这里只汇总一个总数给 GUI 看。
+    uint64_t async_sdo_errors = 0;
 };
 
 /// 阻塞式 SDO 的调用相位。见 ARCHITECTURE.md §0.1：

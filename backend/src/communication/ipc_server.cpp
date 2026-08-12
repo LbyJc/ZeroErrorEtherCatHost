@@ -663,6 +663,9 @@ std::string IpcServer::statusJson() {
       << ",\"wc\":"          << s.bus.working_counter
       << ",\"wc_state\":"    << s.bus.wc_state
       << ",\"dc_ok\":"       << (s.bus.dc_ok ? "true" : "false")
+      // 异步 SDO（0x2240/0x2241/0x22A2...）累计失败次数，跨对象汇总，
+      // 与 igh_bus.cpp::pollAsyncSdo 里限频打印的日志相互印证。
+      << ",\"async_sdo_errors\":" << s.bus.async_sdo_errors
       << ",\"servo\":\""     << toString(s.cia_state) << "\""
       << ",\"controlword\":" << s.controlword
       << ",\"statusword\":"  << s.statusword
