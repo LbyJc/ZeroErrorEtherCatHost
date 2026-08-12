@@ -97,24 +97,41 @@ class ExperimentPanel(QWidget):
         self.command.emit(rec)
         self._set_waiting(line)
 
-    def on_record_ack(self, ok: bool, msg: str = ""):
+    def on_record_ack(self, ok: bool, msg: str = "") -> bool:
         """main_window 收到 record_start 的 ack 后转发到这里（见 main_window._on_ack）。
         若这次 record_start 不是本面板发起的（比如 record_panel 手动触发），
-        _awaiting_line 是 None，直接忽略——不误动本面板状态机。
+        _awaiting_line 是 None，直接忽略——不误动本面板状态机，也不吞掉
+        main_window 自己的失败提示（返回 False，main_window 该弹的框照常弹）。
+
+        返回 True 表示这条 ack 确实是本面板发起、已经处理完（失败已弹过一次
+        "记录未能启动"）——main_window 不应该再为同一条 ack 弹第二个框
+        （复审发现的破坏 #2：record_start 失败时弹两个框）。
         """
         line = self._awaiting_line
         if line is None:
-            return
+            return False
         self._awaiting_line = None
         if not ok:
             self._pending = None
             self._set_idle()
             QMessageBox.warning(self, "记录未能启动",
                                  msg or "record_start 被拒绝，未开始运行。")
-            return
+            return True
         self.command.emit({"cmd": "start_run"})
         self._active_line = line
         self._set_running(line)
+        return True
+
+    def on_disconnected(self):
+        """后端断连时复位——不会再有 record_start 的 ack 事件了，_awaiting_line
+        若不清掉会永久卡在等待态，两个按钮永久禁用，只能重启 GUI（复审发现的
+        破坏 #1，跟 P0 终审抓到的 cia402_panel._running 断连不复位同一类问题）。
+        主站/伺服状态本身也已经不可信了，索性整条状态机回到干净的初始态。
+        """
+        self._awaiting_line = None
+        self._active_line = None
+        self._pending = None
+        self._set_idle()
 
     def _finish(self):
         self.command.emit({"cmd": "stop_run"})

@@ -259,6 +259,9 @@ class MainWindow(QMainWindow):
         # cia_panel 同理：_running 若不复位，运行中断连会冻结在 True。
         self.system_panel.set_disconnected()
         self.cia_panel.set_disconnected()
+        # experiment_panel 同理：record_start 已发、ack 还没回来时断连，
+        # _awaiting_line 不复位就永久卡住两个一键按钮（复审发现的破坏 #1）。
+        self.experiment_panel.on_disconnected()
         self.top.update_status(_EMPTY_STATUS)
 
     def _on_connect_failed(self, why: str):
@@ -350,13 +353,20 @@ class MainWindow(QMainWindow):
     def _on_ack(self, cmd, ok, msg):
         # I3（spec §5）：record_start 可能被后端拒绝（磁盘不足等），一键面板要
         # 靠这个 ack 决定发不发 start_run，不能发了 record_start 就当已经开始。
+        # on_record_ack 返回 True 表示这条 record_start 确实是一键面板发起、
+        # 已经弹过一次"记录未能启动"——下面通用失败弹框要跳过它，否则弹两个框
+        # （复审发现的破坏 #2）。手动 record_panel 触发的 record_start 不经过
+        # 一键面板的等待态，on_record_ack 返回 False，通用弹框照常弹，不受影响。
+        handled_by_experiment_panel = False
         if cmd == "record_start":
-            self.experiment_panel.on_record_ack(ok, msg)
+            handled_by_experiment_panel = self.experiment_panel.on_record_ack(ok, msg)
         if ok:
             return
         # 失败必须给人话原因（任务书第四十三节），而且要显眼
         self.log_panel.append("ERROR", f"{cmd} 失败: {msg}")
         self.statusBar().showMessage(f"{cmd} 失败: {msg}", 8000)
+        if handled_by_experiment_panel:
+            return
         if cmd in ("connect_bus", "reconnect", "servo_enable", "start_run",
                    "record_start", "reset_load_encoder", "homing"):
             QMessageBox.warning(self, f"{cmd} 失败", msg or "未提供原因")
