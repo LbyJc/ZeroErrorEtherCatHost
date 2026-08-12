@@ -348,6 +348,10 @@ class MainWindow(QMainWindow):
         SummaryDialog(info, self).exec()
 
     def _on_ack(self, cmd, ok, msg):
+        # I3（spec §5）：record_start 可能被后端拒绝（磁盘不足等），一键面板要
+        # 靠这个 ack 决定发不发 start_run，不能发了 record_start 就当已经开始。
+        if cmd == "record_start":
+            self.experiment_panel.on_record_ack(ok, msg)
         if ok:
             return
         # 失败必须给人话原因（任务书第四十三节），而且要显眼

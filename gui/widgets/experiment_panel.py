@@ -21,13 +21,16 @@ class ExperimentPanel(QWidget):
     # 用显式信号而非让 main_window 读私有属性——跨对象接口定死，避免时序竞争。
     finished = Signal(str, dict)
 
+    _NAMES = {"A": "持续运行(线A)", "B": "节点实验(线B)"}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._status = {}
-        self._active_line = None          # None / "A" / "B"
+        self._active_line = None          # None / "A" / "B"（record_start 已 ack、在跑）
+        self._awaiting_line = None        # None / "A" / "B"（record_start 已发，等 ack）
         self._pending = None              # 开始时存的元数据，结束导出用
-        self.btn_a = QPushButton("▶ 持续运行(线A) 开始")
-        self.btn_b = QPushButton("▶ 节点实验(线B) 开始")
+        self.btn_a = QPushButton(self._label("A", "start"))
+        self.btn_b = QPushButton(self._label("B", "start"))
         self.btn_a.clicked.connect(lambda: self._toggle("A"))
         self.btn_b.clicked.connect(lambda: self._toggle("B"))
         box = QGroupBox("一键实验")
@@ -53,6 +56,9 @@ class ExperimentPanel(QWidget):
         return None
 
     def _toggle(self, line: str):
+        if self._awaiting_line is not None:
+            QMessageBox.information(self, "请稍候", "正在等待记录确认，请稍候…")
+            return
         if self._active_line == line:
             self._finish()
         elif self._active_line is None:
@@ -84,7 +90,28 @@ class ExperimentPanel(QWidget):
             rec.update(life_hours=vals["life_hours"], test_item=vals["test_item"],
                        rep=vals["rep"], load_percent_Tr=vals["load_percent_Tr"],
                        speed_rpm_target=vals["speed_rpm_target"])
+        # I3（spec §5）：record_start 可能被后端拒绝（比如磁盘不足——DataLogger::start
+        # 的真实拒绝路径），不能发了就当已经开始。这里只发 record_start，进"等待 ack"
+        # 中间态；start_run 挪到 on_record_ack(ok=True) 里，ack 失败则整条回 idle。
+        self._awaiting_line = line
         self.command.emit(rec)
+        self._set_waiting(line)
+
+    def on_record_ack(self, ok: bool, msg: str = ""):
+        """main_window 收到 record_start 的 ack 后转发到这里（见 main_window._on_ack）。
+        若这次 record_start 不是本面板发起的（比如 record_panel 手动触发），
+        _awaiting_line 是 None，直接忽略——不误动本面板状态机。
+        """
+        line = self._awaiting_line
+        if line is None:
+            return
+        self._awaiting_line = None
+        if not ok:
+            self._pending = None
+            self._set_idle()
+            QMessageBox.warning(self, "记录未能启动",
+                                 msg or "record_start 被拒绝，未开始运行。")
+            return
         self.command.emit({"cmd": "start_run"})
         self._active_line = line
         self._set_running(line)
@@ -100,14 +127,30 @@ class ExperimentPanel(QWidget):
         self.finished.emit(line, self._pending or {})
         self._pending = None
 
+    def _label(self, line: str, state: str) -> str:
+        name = self._NAMES[line]
+        if state == "start":
+            return f"▶ {name} 开始"
+        if state == "waiting":
+            return f"⏳ {name} 等待记录确认…"
+        return f"■ {name} 结束"   # running
+
+    def _set_waiting(self, line):
+        b = self.btn_a if line == "A" else self.btn_b
+        other = self.btn_b if line == "A" else self.btn_a
+        b.setText(self._label(line, "waiting"))
+        b.setEnabled(False)
+        other.setEnabled(False)
+
     def _set_running(self, line):
         b = self.btn_a if line == "A" else self.btn_b
         other = self.btn_b if line == "A" else self.btn_a
-        b.setText(b.text().replace("开始", "结束").replace("▶", "■"))
+        b.setText(self._label(line, "running"))
+        b.setEnabled(True)
         other.setEnabled(False)
 
     def _set_idle(self):
-        self.btn_a.setText("▶ 持续运行(线A) 开始")
+        self.btn_a.setText(self._label("A", "start"))
         self.btn_a.setEnabled(True)
-        self.btn_b.setText("▶ 节点实验(线B) 开始")
+        self.btn_b.setText(self._label("B", "start"))
         self.btn_b.setEnabled(True)
