@@ -203,6 +203,19 @@ def main():
         c.pump(1.0)
         h5 = sorted((ROOT / "data").glob("integration_*.h5"))
         check(len(h5) > 0, f"生成了 HDF5 文件: {h5[-1].name if h5 else '无'}")
+        if h5:
+            # 终审 M5：这条 record_start 没带任何实验字段（sample_id 空，走的是旧
+            # record_panel 手动采集路径），三个"留空列说明"attr 不该被写进去——
+            # 它们只对线 B 实验文件有意义，无条件写是纯噪声。
+            import h5py as _h5py_m5
+            with _h5py_m5.File(h5[-1]) as f:
+                a = f["experiment"].attrs
+                check("temperature_joint_C_note" not in a,
+                      "无实验字段的采集不写 temperature_joint_C_note（M5）")
+                check("temperature_motor_C_note" not in a,
+                      "无实验字段的采集不写 temperature_motor_C_note（M5）")
+                check("load_torque_Nm_actual_note" not in a,
+                      "无实验字段的采集不写 load_torque_Nm_actual_note（M5）")
 
         print("\n[10] 停止运行（软停，伺服保持使能）")
         c.send({"cmd": "stop_run"})
@@ -319,6 +332,46 @@ def main():
                 if "temperature_joint_C" in rows[0]:
                     i = rows[0].index("temperature_joint_C")
                     check(rows[1][i] == "", "留空列值为空字段（不是 NA 或 None）")
+
+                # 终审 C1：这是这条 dispatch 的真正验收点——真实后端（不是单测
+                # fixture）产出的文件里，时间/运动学列必须有数据，不能永久空白。
+                if "theta_out_rad" in rows[0] and len(rows) > 1:
+                    j = rows[0].index("theta_out_rad")
+                    vals = [r[j] for r in rows[1:] if r[j] != ""]
+                    check(len(vals) == len(rows) - 1,
+                          "theta_out_rad 每一行都有数据（不是永久空白列）")
+                    if vals:
+                        fvals = [float(v) for v in vals]
+                        check(all(abs(v) < 100.0 for v in fvals),
+                              f"theta_out_rad 是合理的 rad 量级（不是 deg 原样抄）: "
+                              f"max={max(fvals):.3f}")
+                if "theta_in_rad" in rows[0] and len(rows) > 1:
+                    k = rows[0].index("theta_in_rad")
+                    vals_in = [r[k] for r in rows[1:] if r[k] != ""]
+                    check(len(vals_in) == len(rows) - 1,
+                          "theta_in_rad 每一行都有数据（不是永久空白列）")
+                if "timestamp_s" in rows[0] and len(rows) > 1:
+                    t = rows[0].index("timestamp_s")
+                    vals_t = [r[t] for r in rows[1:] if r[t] != ""]
+                    check(len(vals_t) == len(rows) - 1,
+                          "timestamp_s 每一行都有数据（不是永久空白列）")
+
+                # 终审 C2：真实后端用定长字符串 attr（H5T_C_S1），h5py 读回是 bytes——
+                # 导出的 CSV 里字符串列必须是 "A01"，不能是 "b'A01'"。
+                if "sample_id" in rows[0] and len(rows) > 1:
+                    si = rows[0].index("sample_id")
+                    check(rows[1][si] == "A01",
+                          f"sample_id 在 CSV 里已 decode，不是 bytes repr: {rows[1][si]!r}")
+                    check("b'" not in rows[1][si], "sample_id 不含 bytes repr 的 b'…'")
+
+            if os.path.exists(meta_path):
+                import yaml as _yaml_c2
+                with open(meta_path) as fp:
+                    meta2 = _yaml_c2.safe_load(fp)
+                check(meta2.get("sample_id") == "A01",
+                      f".meta.yaml 里 sample_id 已 decode: {meta2.get('sample_id')!r}")
+                check("b'" not in str(meta2.get("sample_id")),
+                      ".meta.yaml 的 sample_id 不含 bytes repr")
 
     finally:
         proc.terminate()
