@@ -70,10 +70,10 @@ pdo:
     # 5 rpm、τ=5ms（异步 SDO 实测抖动）⇒ 约 18 角分，是 h_obs（0.4~1.5 角分）的 20~45 倍。
     #
     # ⚠ Task 15 分级放开：先只放 0x2240，确认进 OP 后再放 0x2241。
-    # - index: 0x1A00
-    #   entries:
-    #     - {index: 0x2240, sub: 0x00, bits: 32, type: i32, name: motor_position}
-    #     - {index: 0x2241, sub: 0x00, bits: 32, type: i32, name: twist_counts}
+    - index: 0x1A00
+      entries:
+        - {index: 0x2240, sub: 0x00, bits: 32, type: i32, name: motor_position}
+        - {index: 0x2241, sub: 0x00, bits: 32, type: i32, name: twist_counts}
     #
     # ⚠ 放开步骤（终审 finding M3）：0x2241 一旦随 0x1A00 进了 PDO，必须同时把
     #   下面 async_sdo 列表里的 0x2241 条目（dual_encoder_diff）注释掉——
@@ -92,8 +92,10 @@ async_sdo:
   # 唯一主链路（填 motor_position），divisor 调高会让有效更新周期退化到
   # 10~15ms（终审 finding I1）。Task 15 放开 0x1A00、PDO 通道接管主链路后，
   # 再随那次改动把它降到 10——那时这条通道只用于 J3 对拍，不需要每拍都问。
-  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position,    poll_divisor: 1}
-  - {index: 0x2241, sub: 0x00, type: i32, name: dual_encoder_diff, poll_divisor: 100}
+  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position,    poll_divisor: 10}
+  # 0x2241 已随 0x1A00 进 PDO（Task 15，2026-08-12）——按终审 M3 注释掉此异步条目，
+  # 避免两条链路同时问同一对象（白耗邮箱带宽 + 双份 errors 计数）。
+  # - {index: 0x2241, sub: 0x00, type: i32, name: dual_encoder_diff, poll_divisor: 100}
   # 0x22A2 在 ESI 里没有 PdoMapping 标志，只能走 SDO。
   # ⚠ 这是驱动器温度，不是绕组温度、更不是关节壳体温度。
   #   采样时刻与 PDO 不同步。1 kHz 下 poll_divisor=1000 即 1 Hz，

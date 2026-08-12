@@ -91,8 +91,15 @@ def j1_dmesg(dmesg_since):
                 "内核日志被重置过）——请重新执行 --record-baseline 后再判定"
             ]
 
-    hits = [l for l in lines if "Failed to configure mapping" in l]
-    return (len(hits) == 0), hits
+    all_fails = [l for l in lines if "Failed to configure mapping" in l]
+    # 2026-08-12 真机实测（Task 15）：这台 ZeroErr eRob80H120 驱动器对**每一个** Fixed="1"
+    # 的既有 PDO（0x1605/0x1A06/07/0D/1F/08/18/19）在每次 activate 时都刷一条
+    # "Failed to configure mapping" WARNING——这是它拒绝逐条改写条目表的固有行为，
+    # 与本次是否放开 0x1A00 无关（P1 之前、0x1A00 注释态时都有），而它照样进 OP、WC=3、
+    # 数据经 J3/J5 验证正确。因此 J1 只对**针对 0x1A00 的**失败判 FAIL；其余归为"固有噪声"。
+    a00_hits = [l for l in all_fails if "0x1A00" in l or "0x1a00" in l]
+    noise    = [l for l in all_fails if l not in a00_hits]
+    return (len(a00_hits) == 0), a00_hits, noise
 
 
 def get_domain_size():
@@ -208,12 +215,18 @@ def main():
 
     results = []
 
-    ok1, hits = j1_dmesg(dmesg_since)
-    print(f"J1 dmesg 无映射失败      : {'PASS' if ok1 else 'FAIL'}"
-          + ("" if dmesg_since else "（未提供基线，全量扫描——同一次开机内的历史失败"
-             "会让本次判定不可靠，建议先跑 --record-baseline）"))
+    j1 = j1_dmesg(dmesg_since)
+    if len(j1) == 2:          # 读取失败/基线缺失分支，返回 (False, [msg])
+        ok1, hits = j1; noise = []
+    else:
+        ok1, hits, noise = j1
+    print(f"J1 无 0x1A00 映射失败     : {'PASS' if ok1 else 'FAIL'}"
+          + ("" if dmesg_since else "（未提供基线，全量扫描——建议先跑 --record-baseline）"))
     for h in hits:
-        print("   ", h)
+        print("   [0x1A00 失败]", h)
+    if noise:
+        print(f"   注意：另有 {len(noise)} 条 Fixed=1 既有 PDO 的映射失败 WARNING——"
+              "这台驱动器的固有行为（每次 activate 都刷，与本次改动无关），不计入 J1。")
     results.append(ok1)
 
     got, size_err = get_domain_size()
