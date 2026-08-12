@@ -65,6 +65,15 @@ struct StartupSdoCfg {
     std::string comment;
 };
 
+/// activate 前的诊断只读 SDO（Task 13 消费）：上线前把这些读一遍，
+/// 异常直接在日志/GUI 里报出来，而不是等到运行中才发现驱动器状态不对。
+struct DiagnosticSdoCfg {
+    uint16_t index = 0;
+    uint8_t  sub   = 0;
+    std::string type;    // "u8" | "u16" | "u32" | "i16" | "i32"
+    std::string name;
+};
+
 struct SlaveCfg {
     uint16_t alias = 0, position = 0;
     uint32_t vendor_id = 0, product_code = 0;
@@ -73,6 +82,7 @@ struct SlaveCfg {
     bool supports_homing = false;
     /// 从站支持的最小通信周期（µs）。0 = 未声明，不校验。
     unsigned min_cycle_us = 0;
+    std::vector<DiagnosticSdoCfg> diagnostic_sdos;
 };
 
 struct AppCfg {

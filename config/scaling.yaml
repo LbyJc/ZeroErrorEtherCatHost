@@ -37,6 +37,17 @@ scaling:
   velocity_direction: 1
   current_direction: 1
 
+  # ── 速度目标基准 / 编码器回绕 ─────────────────────────────────────────
+  # 速度目标以哪一侧为准。true = GUI 输入框里填的是电机侧 rpm。
+  target_velocity_is_motor_side: true
+
+  # 编码器回绕模数。0 = 32 位累加多圈量（本机硬件当前状态）。
+  # ⚠ 本机未装 3.6V 多圈电池，0x730F 上电必报，断电重启后多圈计数丢失、
+  #   位置反馈退化为输出端单圈位置（0~524287）。若出现该情形，
+  #   output_position_modulus 必须改成 524288，否则跨边界会静默跳 360°。
+  motor_position_modulus: 0
+  output_position_modulus: 0
+
   # ── 软限位（仅用于 GUI 告警与 Target 合法性检查，不替代驱动器内部限位）──
   limits:
     motor_velocity_rpm_max: 3000

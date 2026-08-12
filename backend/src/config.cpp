@@ -141,6 +141,20 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
             return false;
         }
     }
+    if (n["diagnostic_sdos"]) {
+        for (const auto& a : n["diagnostic_sdos"]) {
+            DiagnosticSdoCfg c;
+            c.index = static_cast<uint16_t>(asHex(a["index"], 0));
+            c.sub   = static_cast<uint8_t>(asHex(a["sub"], 0));
+            c.type  = get<std::string>(a, "type", "u32");
+            c.name  = get<std::string>(a, "name", "");
+            if (c.index == 0) {
+                *err = "slave.yaml: diagnostic_sdos 条目缺少 index";
+                return false;
+            }
+            o->slave.diagnostic_sdos.push_back(c);
+        }
+    }
     if (n["startup_sdo"]) {
         for (const auto& a : n["startup_sdo"]) {
             StartupSdoCfg c;
@@ -201,6 +215,15 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
         sc.position_direction = get<int>(s, "position_direction", 1);
         sc.velocity_direction = get<int>(s, "velocity_direction", 1);
         sc.current_direction  = get<int>(s, "current_direction", 1);
+        // 默认值必须与 ScalingConfig 的 struct 默认值一致（true / 0 / 0），
+        // 否则缺 key 的旧配置目录会在这里悄悄漂移出与代码默认不一致的行为
+        // （参见 P0 finding I1 的教训：stop_ramp.csp_hold_position 曾经这样）。
+        sc.target_velocity_is_motor_side =
+            get<bool>(s, "target_velocity_is_motor_side", true);
+        sc.motor_position_modulus =
+            static_cast<int64_t>(get<double>(s, "motor_position_modulus", 0.0));
+        sc.output_position_modulus =
+            static_cast<int64_t>(get<double>(s, "output_position_modulus", 0.0));
         if (auto lim = s["limits"]) {
             sc.motor_velocity_rpm_max  = get<double>(lim, "motor_velocity_rpm_max", 3000.0);
             sc.output_velocity_rpm_max = get<double>(lim, "output_velocity_rpm_max", 25.0);
