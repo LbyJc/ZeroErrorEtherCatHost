@@ -23,25 +23,6 @@ if(NOT ECRT_INCLUDE_DIR OR NOT ECRT_LIBRARY)
 endif()
 message(STATUS "IgH EtherCAT: ${ECRT_LIBRARY}")
 
-# ── Git commit（metadata 落地用，Task 13）──────────────────────────────────
-# 构建目录不在 git 仓库里（例如从 tarball 构建、.git 被裁掉）时优雅降级为
-# "unknown"，不让配置失败：这是可选的追溯信息，不是编译前提。
-set(ECJC_GIT_COMMIT "unknown")
-find_package(Git QUIET)
-if(GIT_FOUND)
-  execute_process(
-    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE ECJC_GIT_COMMIT_OUT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE ECJC_GIT_RESULT)
-  if(ECJC_GIT_RESULT EQUAL 0 AND NOT ECJC_GIT_COMMIT_OUT STREQUAL "")
-    set(ECJC_GIT_COMMIT "${ECJC_GIT_COMMIT_OUT}")
-  endif()
-endif()
-message(STATUS "Git commit: ${ECJC_GIT_COMMIT}")
-
 # ── yaml-cpp ─────────────────────────────────────────────────────────────
 find_package(yaml-cpp QUIET)
 if(NOT yaml-cpp_FOUND)
@@ -76,14 +57,36 @@ endif()
 target_include_directories(ecjc_core PUBLIC ${HDF5_INCLUDE_DIRS} /usr/local/include)
 target_link_libraries(ecjc_core PUBLIC ${HDF5_LIBRARIES} pthread)
 
+# ── Git commit（metadata 落地用，Task 13；评审 Critical 2 后改为构建时刷新）──
+# 原先用 execute_process() 在 CMake configure 阶段跑一次 git rev-parse，烤进
+# target_compile_definitions——但日常"改代码 → commit → cmake --build"不会
+# 触发 reconfigure，二进制里嵌的会是上一次 configure 时的陈旧 hash，比不记录
+# 更危险（数据看起来绑了版本，实际绑错了）。
+#
+# 改为：add_custom_target(... ALL ...) 驱动 cmake/GenerateGitVersion.cmake，
+# 让它在**每次 build**都重新跑一遍 git rev-parse 并写 git_version.h；脚本内部
+# 做了"内容不变就不落盘"的比较，避免 hash 没变时也把 main.cpp 的编译判定为
+# 过期（见脚本内注释）。main.cpp 用 __has_include 兜底 —— 找不到这个生成头时
+# （例如绕开 CMake 的编译路径）自己把 ECJC_GIT_COMMIT 定义成 "unknown"。
+set(ECJC_GIT_VERSION_HEADER "${CMAKE_BINARY_DIR}/generated/ecjc/git_version.h")
+add_custom_target(ecjc_git_version ALL
+  COMMAND ${CMAKE_COMMAND}
+          -DECJC_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          -DECJC_DST=${ECJC_GIT_VERSION_HEADER}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateGitVersion.cmake
+  BYPRODUCTS ${ECJC_GIT_VERSION_HEADER}
+  COMMENT "刷新 git_version.h（每次 build 都重算，不只是 configure 时）"
+  VERBATIM)
+
 # ── Backend 可执行 ───────────────────────────────────────────────────────
 add_executable(ecjc-backend
   backend/main.cpp
   backend/src/ethercat/igh_bus.cpp
 )
-target_include_directories(ecjc-backend PRIVATE ${ECRT_INCLUDE_DIR} ${HDF5_INCLUDE_DIRS})
+target_include_directories(ecjc-backend PRIVATE ${ECRT_INCLUDE_DIR} ${HDF5_INCLUDE_DIRS}
+                                                 "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(ecjc-backend PRIVATE ecjc_core ${ECRT_LIBRARY} ${HDF5_LIBRARIES} pthread rt)
-target_compile_definitions(ecjc-backend PRIVATE ECJC_GIT_COMMIT="${ECJC_GIT_COMMIT}")
+add_dependencies(ecjc-backend ecjc_git_version)
 
 # ── 单元测试 ─────────────────────────────────────────────────────────────
 enable_testing()

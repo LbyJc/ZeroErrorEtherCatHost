@@ -23,9 +23,16 @@
 #include "ecjc/ipc_server.hpp"
 #include "ecjc/realtime_task.hpp"
 
-// CMakeLists.txt 用 execute_process(git rev-parse --short HEAD) 注入。
-// 直接绕开 CMake 编译（例如手写 Makefile/IDE 单文件编译）时这个宏不存在，
-// 下面的 #ifndef 兜底成 "unknown"，不让整个构建因为缺一个可选的追溯字段而炸。
+// git_version.h 由 cmake/GenerateGitVersion.cmake 生成，CMakeLists.txt 里
+// 用 add_custom_target(... ALL ...) 绑到 ecjc-backend，在**每次 build**
+// （不只是 configure）都重新跑一遍 git rev-parse——评审 Critical 2：改之前
+// 是 configure 时执行一次烤进 compile definition，日常"改代码→commit→
+// cmake --build"不触发 reconfigure，二进制里嵌的会是陈旧 hash，比不记录更危险。
+// __has_include 是为了绕开 CMake 的编译路径（例如手写 Makefile/IDE 单文件
+// 编译）时优雅降级，不让构建因为缺一个可选的追溯字段而炸。
+#if __has_include("ecjc/git_version.h")
+#include "ecjc/git_version.h"
+#endif
 #ifndef ECJC_GIT_COMMIT
 #define ECJC_GIT_COMMIT "unknown"
 #endif

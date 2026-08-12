@@ -70,7 +70,7 @@ struct StartupSdoCfg {
 struct DiagnosticSdoCfg {
     uint16_t index = 0;
     uint8_t  sub   = 0;
-    std::string type;    // "u8" | "u16" | "u32" | "i16" | "i32"
+    std::string type;    // "u8" | "i8" | "u16" | "i16" | "u32" | "i32"
     std::string name;
 };
 

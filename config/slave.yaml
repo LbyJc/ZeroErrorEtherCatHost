@@ -65,10 +65,17 @@ diagnostic_sdos:
   - {index: 0x2381, sub: 0x02, type: u32, name: "vel_loop_ki"}
   - {index: 0x2382, sub: 0x01, type: u32, name: "pos_loop_kp"}
   # ── SM 同步诊断：直接量化 0xA000 的根因，改映射前后各读一次 ──
-  - {index: 0x1C33, sub: 0x04, type: u16, name: "sm_in_min_cycle_ns"}
-  - {index: 0x1C33, sub: 0x05, type: u16, name: "sm_in_calc_copy_ns"}
-  - {index: 0x1C33, sub: 0x09, type: u16, name: "sm_in_event_missed"}
-  - {index: 0x1C33, sub: 0x0A, type: u16, name: "sm_in_cycle_too_small"}
+  # 子索引/位宽已对照 ESI（DT1C33，/home/tyy/eRob_EtherCAT/ethercat/
+  # ZeroErr+Driver_V3.2.0.xml 行 467-591）逐项核实：早期审核那版清单把 :04
+  # （Synchronization Types supported，位掩码）当成 Minimum Cycle Time，
+  # 且把两个 32 位字段（Minimum Cycle Time / Calc and Copy Time）当成了 16 位——
+  # 读不会报错但记的是错的量/截断的值，比读失败更隐蔽。以下是核实后的正确映射：
+  #   :05 u32 Minimum Cycle Time / :06 u32 Calc and Copy Time /
+  #   :0B u16 SM-Event Missed / :0C u16 Cycle Time Too Small
+  - {index: 0x1C33, sub: 0x05, type: u32, name: "sm_in_min_cycle_ns"}
+  - {index: 0x1C33, sub: 0x06, type: u32, name: "sm_in_calc_copy_ns"}
+  - {index: 0x1C33, sub: 0x0B, type: u16, name: "sm_in_event_missed"}
+  - {index: 0x1C33, sub: 0x0C, type: u16, name: "sm_in_cycle_too_small"}
 
 # ── 启动时下发给驱动器的参数 ─────────────────────────────────────────────
 # 在 activate 之前用阻塞式 SDO 写（此时相位合法）。
