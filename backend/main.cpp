@@ -67,7 +67,7 @@ int acquireInstanceLock(const std::string& sock_path) {
 //   kDisconnectWaitSec   —— disconnect() 等"软停到位（isSafeToDisableAt）"
 //                            的外部等待上限。3000rpm/200rpm/s=15s，这里留到
 //                            20s 给减速度更慢/负载扰动的余量。
-//   kDisableGateBudgetSec —— RT 线程自己那份门控预算（config/motion.yaml 的
+//   kDisableGateBudgetSec —— RT 线程自己那份门控预算（config/trajectory.yaml 的
 //                            stop_ramp.disable_timeout_cycles，默认 1kHz 下
 //                            15s）。disconnect() 的 20s 等待结束后才会调用
 //                            servoDisable()，届时这份预算才开始倒数——而且

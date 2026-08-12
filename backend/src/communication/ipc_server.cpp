@@ -444,11 +444,17 @@ void IpcServer::evictClient(int fd) {
     // 调用方（threadMain）负责检测"不在 clients_ 里了"并自己收尾 close()。
     //
     // finding I5：只有在 clients_mu_ 下"抢到了 erase"（这个 fd 确实还在
-    // clients_ 里、还没被 dropClient 摘过）的调用才去 shutdown()。原来的写法
-    // 是"先解锁再无条件 shutdown"，如果这个 fd 在 evictClient 拿到锁之前已经
-    // 被 dropClient() erase+close()，操作系统可能早把这个数字复用给一个全新的
-    // accept() 连接——这里的 shutdown() 就会打死一个完全无辜的新连接。
-    // erase 成功与否天然是"谁先抢到"的判定，不需要额外加状态。
+    // clients_ 里、还没被 dropClient 摘过）的调用才去 shutdown()。erase 成功
+    // 与否天然是"谁先抢到"的判定，不需要额外加状态。
+    //
+    // shutdown() 本身也必须在同一段临界区**里**做，不能解锁之后再调用：
+    // dropClient() 的 close(fd)（见其函数体）发生在它自己拿到并释放
+    // clients_mu_ 之后。如果这里先解锁再 shutdown，erase 赢了之后的窄窗口里，
+    // dropClient() 可能已经并发地把 fd close 掉、OS 把这个数字复用给一个全新
+    // 的 accept() 连接——这时才执行的 shutdown() 就会打死那个无辜的新连接。
+    // 把 shutdown() 留在锁内，就保证了它必定先于 dropClient() 的 close()：
+    // dropClient() 想拿同一把锁完成它自己的 erase，必须等这里把锁放掉，而
+    // 锁只在 shutdown() 做完之后才释放。
     bool erased = false;
     {
         std::lock_guard<std::mutex> lk(clients_mu_);
@@ -458,9 +464,11 @@ void IpcServer::evictClient(int fd) {
         // 标记"这是被踢的"，供 dropClient() 判定是否要走重连宽限期（finding C3）。
         // 必须和上面的 erase 在同一段临界区里做，避免和 dropClient() 之间出现
         // "erase 了但还没来得及标记"的窗口。
-        if (erased) evicted_fds_.insert(fd);
+        if (erased) {
+            evicted_fds_.insert(fd);
+            ::shutdown(fd, SHUT_RDWR);
+        }
     }
-    if (erased) ::shutdown(fd, SHUT_RDWR);
 }
 
 void IpcServer::forgetClient(int fd) {
