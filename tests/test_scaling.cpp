@@ -200,3 +200,22 @@ TEST(output_counts_to_rad) {
 TEST(arcmin_to_rad) {
     CHECK_NEAR(Scaling::arcminToRad(1.0), 2.908882e-4, 1e-10);
 }
+
+// 力矩指令/回读往返恒等式：与 degToTargetPosition/rpmToTargetVelocity 一致，
+// nmToTargetTorque（下行）必须和 toPhysical（上行）的方向系数对称，
+// 否则 current_direction=-1 时下发 +X Nm 会回读成 -X Nm。
+// 用 15.5 Nm（= 500 千分比，31000mNm × 0.001 精确整除）避免 int16 千分比量化
+// 噪声（分辨率 31000mNm×0.001/1000 = 0.031 Nm/count）掩盖或误报方向 bug。
+TEST(torque_command_readback_roundtrip_respects_direction) {
+    ScalingConfig c = realCfg();
+    c.current_direction = -1;
+    Scaling s(c);
+
+    const int16_t raw_target = s.nmToTargetTorque(15.5);
+    RawIo raw{};
+    raw.torque_actual = raw_target;   // 假设驱动器原样执行并回读
+    JointState j{};
+    s.toPhysical(raw, &j);
+
+    CHECK_NEAR(j.torque_Nm, 15.5, 1e-6);  // 往返恒等：下发 +15.5 Nm，回读也应是 +15.5 Nm
+}

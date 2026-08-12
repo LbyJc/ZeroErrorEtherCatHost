@@ -78,8 +78,11 @@ double Scaling::targetVelocityToRpm(int32_t raw, bool motor_side) const {
 }
 
 int16_t Scaling::nmToTargetTorque(double nm) const {
-    // 千分比，先按软限位裁剪
-    double t = nm;
+    // 千分比。与 degToTargetPosition / rpmToTargetVelocity 一样乘 current_direction，
+    // 和 toPhysical 里力矩回读的方向系数对称——保证 nmToTargetTorque → toPhysical
+    // 往返在任意 current_direction 下都是恒等映射（下发 +X Nm 回读也是 +X Nm）。
+    // torque_Nm_max 是对称软限位，乘方向系数在裁剪前后做效果相同。
+    double t = nm * static_cast<double>(c_.current_direction);
     if (t >  c_.torque_Nm_max) t =  c_.torque_Nm_max;
     if (t < -c_.torque_Nm_max) t = -c_.torque_Nm_max;
     const double per_mille = t / (c_.rated_torque_mNm / 1000.0) / c_.torque_scale;
