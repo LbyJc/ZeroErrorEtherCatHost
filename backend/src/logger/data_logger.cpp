@@ -240,11 +240,15 @@ bool DataLogger::openFile(std::string* err) {
     if (meta_.speed_rpm_target >= 0)    attrDbl("speed_rpm_target", meta_.speed_rpm_target);
     if (!meta_.operator_name.empty())   attrStr("operator", meta_.operator_name);
     if (!meta_.exp_notes.empty())       attrStr("notes", meta_.exp_notes);
-    // 三个留空列在 metadata 注明未采集原因（常量说明，无条件写）
-    attrStr("temperature_joint_C_note", "外部传感器，未采集");
-    attrStr("temperature_motor_C_note", "总线无绕组温度，未采集");
-    attrStr("load_torque_Nm_actual_note",
-            "外部转矩传感器，未采集；0x3B69 是关节自估传递转矩，语义不同");
+    // 三个留空列在 metadata 注明未采集原因——但只在这确实是一次线 B 实验采集时写
+    // （sample_id 非空即视为一键实验流程）。旧 record_panel 手动采集不带实验字段，
+    // 给它也无条件塞这三条只对 A.1 CSV 有意义的说明，是纯噪声（终审 finding M5）。
+    if (!meta_.sample_id.empty()) {
+        attrStr("temperature_joint_C_note", "外部传感器，未采集");
+        attrStr("temperature_motor_C_note", "总线无绕组温度，未采集");
+        attrStr("load_torque_Nm_actual_note",
+                "外部转矩传感器，未采集；0x3B69 是关节自估传递转矩，语义不同");
+    }
 
     // ── 建列 ───────────────────────────────────────────────────────
     // 列名/类型的唯一数据源是 ECJC_SAMPLE_COLUMNS（data_logger.hpp）：
