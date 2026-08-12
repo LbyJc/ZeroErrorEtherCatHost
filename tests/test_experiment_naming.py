@@ -27,6 +27,21 @@ def test_csv_filename_accepts_all_valid_items():
         en.csv_filename("A01", 100, item, 0, 5, 1)   # 不抛异常即通过
 
 
+def test_csv_filename_normalizes_whole_float_values():
+    # 终审 I4：QDoubleSpinBox.value() 直传进来是 float，100.0 不能拼成 life_100.0h
+    n = en.csv_filename("A01", 100.0, "TE", 0.0, 5.0, 1)
+    assert n == \
+        "sample_A01__life_100h__test_TE__load_0Tr__speed_5rpm__dir_na__amp_na__freq_na__rep_01.csv"
+    assert "100.0" not in n
+    assert "0.0" not in n
+    assert "5.0" not in n
+
+
+def test_csv_filename_keeps_non_integer_float_values():
+    n = en.csv_filename("A01", 100, "TE", 12.5, 5, 1)
+    assert "__load_12.5Tr__" in n
+
+
 def test_a1_columns_well_formed():
     # 三个留空列必须在公共字段列表里
     for c in en.EMPTY_COLUMNS:

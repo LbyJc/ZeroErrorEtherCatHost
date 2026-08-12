@@ -23,12 +23,26 @@ A1_COLUMNS = [
 ]
 
 
+def _norm_num(x):
+    """去掉整数值浮点数的 .0（GUI 的 QDoubleSpinBox.value() 直传进来是 float，
+    100.0 会拼成文件名 life_100.0h，下游 life_(\\d+)h 的正则解析不上——终审 I4）。
+    非整数值原样返回，不做四舍五入。"""
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return x
+    return int(f) if f == int(f) else f
+
+
 def csv_filename(sample_id, life_hours, test_item, load_pct, speed_rpm, rep,
                  direction="na", amp_deg="na", freq_hz="na") -> str:
     """按 §4.2 扩展模板拼 CSV 文件名。test_item 必须属受控词表。"""
     if test_item not in VALID_TEST_ITEMS:
         raise ValueError(
             f"test_item '{test_item}' 不在受控词表 {sorted(VALID_TEST_ITEMS)}")
+    life_hours = _norm_num(life_hours)
+    load_pct = _norm_num(load_pct)
+    speed_rpm = _norm_num(speed_rpm)
     return (f"sample_{sample_id}__life_{life_hours}h__test_{test_item}"
             f"__load_{load_pct}Tr__speed_{speed_rpm}rpm"
             f"__dir_{direction}__amp_{amp_deg}__freq_{freq_hz}"
