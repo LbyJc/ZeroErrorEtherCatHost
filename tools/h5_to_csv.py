@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 from pathlib import Path
 
@@ -17,12 +18,45 @@ import numpy as np
 import yaml
 
 
+def _dec(v):
+    """定长字符串 attr(后端用 H5Tcopy(H5T_C_S1)写的)经 h5py 读回是 bytes/
+    numpy.bytes_，不 decode 就会在 CSV/.meta.yaml 里变成 "b'A01'"（终审 C2）。
+    """
+    if isinstance(v, (bytes, np.bytes_)):
+        return v.decode()
+    return v
+
+
+def _deg2rad(x):
+    return x * math.pi / 180.0
+
+
+def _rpm2rads(x):
+    return x * 2.0 * math.pi / 60.0
+
+
+# A.1 规范列 → 真实 HDF5 dataset 名(候选列表，按优先级取第一个存在的) + 单位转换函数。
+# dataset 名以 backend/include/ecjc/data_logger.hpp 的 ECJC_SAMPLE_COLUMNS 为准：
+# 那边是 deg / rpm，A.1 要 rad / rad_s，名字和单位都对不上，不能指望同名匹配（终审 C1）。
+# 角度优先取 unwrapped（跨零点不回绕，做角速度/圈数积分更安全）；这台后端两个都会
+# 建列，unwrapped 恒在场，wrapped 只是给旧文件/非标准 fixture 的兜底。
+A1_SOURCE = {
+    "timestamp_s":     (["elapsed_time_s"], None),
+    "theta_in_rad":    (["motor_position_unwrapped_deg", "motor_position_deg"], _deg2rad),
+    "theta_out_rad":   (["output_position_unwrapped_deg", "output_position_deg"], _deg2rad),
+    "omega_in_rad_s":  (["motor_velocity_rpm"], _rpm2rads),
+    "omega_out_rad_s": (["output_velocity_rpm"], _rpm2rads),
+    "motor_current_A": (["motor_current_A"], None),
+}
+
+
 def export_a1(h5path, out_csv):
     """按 A.1 列顺序导出 CSV(含三个留空列写空字段) + 同名 .meta.yaml。
 
     列 = A.1 公共字段(含留空列) + 扩展列(HDF5 里有、但不在 A.1 的，排序保证确定性)。
-    per-file 常量(HDF5 group attrs)逐行重复写入；逐样本量取 dataset；
-    留空列/缺失量写空字段(不是 "NA")。
+    每个 A.1 列先查 A1_SOURCE 映射(有则取对应 dataset 并做单位转换)，
+    再退化为直接同名 dataset，再退化为 attr 常量(逐行重复)，
+    都没有才写空字段(不是 "NA")——这是留空列(EMPTY_COLUMNS)真正落空的路径。
     返回 out_csv。
     """
     import os
@@ -43,15 +77,23 @@ def export_a1(h5path, out_csv):
             for i in range(n):
                 row = []
                 for c in cols:
-                    if c in present:
+                    src = A1_SOURCE.get(c)
+                    ds_name = None
+                    if src is not None:
+                        names, conv = src
+                        ds_name = next((nm for nm in names if nm in present), None)
+                    if ds_name is not None:
+                        val = g[ds_name][i]
+                        row.append(conv(val) if conv else val)
+                    elif c in present:
                         row.append(g[c][i])
                     elif c in attrs:
-                        row.append(attrs[c])  # per-file 常量逐行重复
+                        row.append(_dec(attrs[c]))  # per-file 常量逐行重复
                     else:
                         row.append("")  # 留空列 / 未采集量
                 w.writerow(row)
 
-    calib = {k: (float(v) if isinstance(v, (int, float, np.floating)) else str(v))
+    calib = {k: (float(v) if isinstance(v, (int, float, np.floating)) else _dec(v))
              for k, v in attrs.items()}
     meta_path = os.path.splitext(out_csv)[0] + ".meta.yaml"
     with open(meta_path, "w") as fp:
