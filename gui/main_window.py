@@ -17,6 +17,7 @@ from ipc_client import IpcClient
 from widgets.cia402_panel import Cia402Panel
 from widgets.config_panel import ConfigPanel
 from widgets.data_record_panel import DataRecordPanel
+from widgets.experiment_panel import ExperimentPanel
 from widgets.live_panel import LivePanel
 from widgets.log_panel import LogPanel
 from widgets.mode_panel import ModePanel
@@ -45,6 +46,8 @@ class MainWindow(QMainWindow):
         self._backend_proc = None
         self._pending_cmd = None
         self._perm_warned = False
+        self._last_rec_file = ""
+        self._last_rec_samples = ""
 
         self.setWindowTitle(
             f"{cfg.app.get('name', 'EtherCAT Joint Control')} "
@@ -61,6 +64,7 @@ class MainWindow(QMainWindow):
         self.system_panel = SystemPanel(cfg)
         self.cia_panel = Cia402Panel(cfg)
         self.mode_panel = ModePanel(cfg)
+        self.experiment_panel = ExperimentPanel()
         self.live_panel = LivePanel(cfg)
         self.plot_panel = PlotPanel(cfg)
 
@@ -71,9 +75,15 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.cia_panel)
         left_scroll = _scroll(left)
 
+        mid = QWidget()
+        ml = QVBoxLayout(mid)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.addWidget(self.experiment_panel)
+        ml.addWidget(self.mode_panel)
+
         cols = QSplitter(Qt.Horizontal)
         cols.addWidget(left_scroll)
-        cols.addWidget(_scroll(self.mode_panel))
+        cols.addWidget(_scroll(mid))
         cols.addWidget(_scroll(self.live_panel))
         cols.setSizes([380, 420, 340])
 
@@ -108,8 +118,9 @@ class MainWindow(QMainWindow):
 
         # ── 信号连接 ────────────────────────────────────────────────
         for p in (self.system_panel, self.cia_panel, self.mode_panel,
-                  self.param_panel, self.record_panel):
+                  self.param_panel, self.record_panel, self.experiment_panel):
             p.command.connect(self._send)
+        self.experiment_panel.finished.connect(self._on_experiment_finished)
 
         self.ipc.connected.connect(self._on_connected)
         self.ipc.disconnected.connect(self._on_disconnected)
@@ -280,6 +291,7 @@ class MainWindow(QMainWindow):
         self.cia_panel.update_status(st)
         self.mode_panel.update_status(st)
         self.record_panel.update_status(st)
+        self.experiment_panel.update_status(st)
 
     def _on_telemetry(self, arr):
         self.plot_panel.append(arr)
@@ -302,6 +314,38 @@ class MainWindow(QMainWindow):
     def _on_recording(self, rec):
         self.record_panel.update_recording(rec)
         self.top.update_recording(rec)
+        # 一键实验结束时导 CSV 要用这份 h5 路径；record_stop 后 recording
+        # 事件仍会带着最后一次落盘的 file/samples，所以这里只缓存，不清空。
+        f = rec.get("file", "")
+        if f:
+            self._last_rec_file = f
+            self._last_rec_samples = rec.get("samples", "")
+
+    def _on_experiment_finished(self, line: str, meta: dict):
+        """一键实验面板点【结束】后触发：线 B 自动导 A.1 CSV，然后弹汇总框。"""
+        from widgets.experiment_dialog import SummaryDialog
+
+        h5_path = self._last_rec_file
+        info = {"h5_path": h5_path, "samples": self._last_rec_samples}
+        if line == "B" and h5_path:
+            try:
+                sys.path.insert(0, os.path.join(self.cfg.root, "tools"))
+                import h5_to_csv
+                import experiment_naming as en
+
+                csv_name = en.csv_filename(
+                    meta["sample_id"], meta["life_hours"], meta["test_item"],
+                    meta["load_percent_Tr"], meta["speed_rpm_target"], meta["rep"])
+                csv_path = os.path.join(meta["out_dir"], csv_name)
+                h5_to_csv.export_a1(h5_path, csv_path)
+                info["csv_path"] = csv_path
+            except Exception as e:
+                info["csv_path"] = None
+                info["error"] = f"CSV 导出失败: {e}"
+        elif line == "B" and not h5_path:
+            info["csv_path"] = None
+            info["error"] = "未找到本次录制的 HDF5 路径，跳过 CSV 导出。"
+        SummaryDialog(info, self).exec()
 
     def _on_ack(self, cmd, ok, msg):
         if ok:
