@@ -356,16 +356,12 @@ public:
                     ecrt_sdo_request_read(a.req);
                     break;
                 case EC_REQUEST_ERROR:
+                    // 只计数，不在这里打印：RT 线程跑 SCHED_FIFO + clock_nanosleep
+                    // 定拍，stdio 调用（fprintf/snprintf 到 stderr）没有确定的
+                    // 上界延迟，这条路径恰又与总线不稳场景相关——最坏时刻不能
+                    // 加不确定延迟。async_sdo_errors 已经汇总进 BusStatus/statusJson，
+                    // 非 RT 侧（IPC/GUI）按需在那读取、要打日志也在那打。
                     ++a.errors;
-                    // 限频：只在第一次失败、以及此后每 1000 次失败时打一条日志，
-                    // 避免总线故障期间刷屏。RT 循环里这条路径极少走到
-                    // （正常情况下 EC_REQUEST_ERROR 几乎不出现），可以接受。
-                    if (a.errors == 1 || a.errors % 1000 == 0) {
-                        std::fprintf(stderr,
-                            "[WARNING] 异步 SDO 0x%04X (%s) 读取失败 %llu 次\n",
-                            a.cfg.index, a.cfg.name.c_str(),
-                            static_cast<unsigned long long>(a.errors));
-                    }
                     ecrt_sdo_request_read(a.req);
                     break;
                 default:   // EC_REQUEST_BUSY：本拍不动，绝不等待
