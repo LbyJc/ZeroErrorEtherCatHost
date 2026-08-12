@@ -2020,12 +2020,13 @@ pkexec /usr/local/bin/ethercat master | head -6
 pkexec /usr/local/bin/ethercat slaves
 ./build/ecjc-backend --config config &
 sleep 3
-/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-bytes 44
+/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --record-baseline
+/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-delta 0
 ```
 
-Expected: 当前配置（`0x1A00` 仍注释）下 domain = **44 字节**（36 + `0x1A18` 4 + `0x1A19` 4）；从站 OP；dmesg 无映射失败
+Expected: `--record-baseline` 记下当前 dmesg 标记行与 domain 字节数（终审 finding C2 之后，`ethercat domains` 报的是 Rx+Tx 合计，当前配置下本机实测应为 **60 字节** = RxPDO 0x1605 16 字节 + TxPDO 0x1A06/07/0D/1F/08/18/19 合计 44 字节；`--expect-delta 0` 校验"相对刚记的基线没有变化"）；从站 OP；dmesg 无映射失败（J1 现在带 pkexec 读权限并检查 returncode，见 finding C1）
 
-记下 J6 的 `0x1C33:04/05` 读数作为**改映射前的基线**。
+记下 J6 的 `0x1C33:05/06` 读数作为**改映射前的基线**。
 
 ```bash
 pgrep -x ecjc-backend | xargs -r kill
@@ -2044,10 +2045,10 @@ pgrep -x ecjc-backend | xargs -r kill
 ```bash
 ./build/ecjc-backend --config config &
 sleep 5
-/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-bytes 48
+/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-delta 4
 ```
 
-Expected: J1 PASS（dmesg 无 `Failed to configure mapping of PDO 0x1A00`）；J2 domain = 48；从站 OP
+Expected: J1 PASS（dmesg 无 `Failed to configure mapping of PDO 0x1A00`）；J2 domain = 基线 + 4 = 64；从站 OP
 
 **若卡在 SAFEOP 或 dmesg 有告警 → 立即执行 Step 3 回退，不要继续。**
 
@@ -2060,10 +2061,10 @@ pgrep -x ecjc-backend | xargs -r kill
 # 把 0x1A00 整段重新注释掉
 ./build/ecjc-backend --config config &
 sleep 5
-/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-bytes 44
+/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-delta 0
 ```
 
-Expected: 回到 44 字节、从站 OP、dmesg 干净 ⇒ **回退路径验证通过**
+Expected: 回到基线字节数（60）、从站 OP、dmesg 干净 ⇒ **回退路径验证通过**
 
 > 注意：驱动器断电重启**不是**有效的回退手段。IgH 的 `fsm_pdo.c` 里 `// always write PDO mapping` 意味着每次 activate 都无条件重写，只要 `pdo.yaml` 没改，重启后端会把同样的映射再写一遍。**唯一的回退是改配置文件。**
 
@@ -2079,10 +2080,10 @@ Expected: 回到 44 字节、从站 OP、dmesg 干净 ⇒ **回退路径验证�
 ```bash
 ./build/ecjc-backend --config config &
 sleep 5
-/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-bytes 52
+/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-delta 8
 ```
 
-Expected: J1 PASS；J2 domain = 52；从站 OP
+Expected: J1 PASS；J2 domain = 基线 + 8 = 68；从站 OP
 
 - [ ] **Step 5: J3 —— 两路 `0x2240` 静止对拍**
 
@@ -2139,11 +2140,19 @@ Expected: `k ∈ [30.23, 30.26]`，残差 RMS 在编码器噪声量级（几个 
 
 - [ ] **Step 8: J6 —— 改映射前后的 SM 时序对比**
 
+子索引与位宽按 Task 13 的修正核对（不是 :04/:05/:09/:10），与 `tools/verify_pdo_remap.py` 的 J6 用同一套：
+
 ```bash
-pkexec /usr/local/bin/ethercat upload -p0 0x1C33 4 --type uint16
-pkexec /usr/local/bin/ethercat upload -p0 0x1C33 5 --type uint16
-pkexec /usr/local/bin/ethercat upload -p0 0x1C33 9 --type uint16   # SM-Event Missed
-pkexec /usr/local/bin/ethercat upload -p0 0x1C33 10 --type uint16  # Cycle Time Too Small
+pkexec /usr/local/bin/ethercat upload -p0 0x1C33 5   --type uint32  # Minimum Cycle Time
+pkexec /usr/local/bin/ethercat upload -p0 0x1C33 6   --type uint32  # Calc and Copy Time
+pkexec /usr/local/bin/ethercat upload -p0 0x1C33 0xB --type uint16  # SM-Event Missed
+pkexec /usr/local/bin/ethercat upload -p0 0x1C33 0xC --type uint16  # Cycle Time Too Small
+```
+
+或者直接跑 `tools/verify_pdo_remap.py`——J6 已经按这套子索引/位宽实现，输出里会带上这四个值：
+
+```bash
+/home/tyy/miniconda3/envs/zeroError/bin/python tools/verify_pdo_remap.py --expect-delta 8
 ```
 
 Expected: `Calc and Copy Time` 相对 Step 1 的基线有小幅增长（SM3 从 36 → 52 字节，+44%），但仍远小于 1 ms；`SM-Event Missed` 与 `Cycle Time Too Small` 为 0
