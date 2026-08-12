@@ -1,9 +1,15 @@
-# EtherCAT Robot Joint Control Software
+# ZeroErr EtherCAT Host — 机器人关节实时控制与寿命实验上位机
 
 基于 **Linux + IgH EtherCAT Master + CiA402** 的机器人关节实时控制、在线调参、
 实时曲线与长时间数据采集上位机。
 
-目标硬件：ZeroErr eRob80H120I-BHM-18ET[V6] 一体化关节 + Intel I210 + IgH Master 1.5.4。
+目标硬件：ZeroErr eRob80H120I-BHM-18ET[V6] 一体化关节（谐波减速器）+ Intel I210 + IgH Master 1.5.4。
+
+当前服务的实验：**整机关节不可拆在线寿命实验**——450 h 摆臂交变载荷寿命运行（线 A）
++ 13 个寿命节点的受控性能测试（线 B），产出谐波减速器退化数据
+（建模主标签：0 Nm 回程误差代理回差 `h_obs_arcmin`，量级 0.4~1.5 角分）。
+为此本工程把总线上能读到的物理量**全部**端到端落盘（37 列 HDF5），
+并把角分级测量的数据链路（同刻扭转角 `0x2241`、时间偏斜消除）打通。
 
 ```
 PySide6 GUI (普通用户)  ──Unix socket──▶  C++ 实时后端 (root)  ──ecrt──▶  IgH Master ──▶ 关节
@@ -23,7 +29,7 @@ PySide6 GUI (普通用户)  ──Unix socket──▶  C++ 实时后端 (root) 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-/home/tyy/miniconda3/envs/zeroError/bin/python gui/main.py --mock
+python gui/main.py --mock
 ```
 
 Mock 后端会仿真 CiA402 状态机与关节动力学，产生**与真实驱动器同尺度的原始计数**，
@@ -39,7 +45,7 @@ pkexec /usr/local/etc/init.d/ethercat start
 pkexec ./build/ecjc-backend --config config
 
 # 3. 启动 GUI（普通用户）
-/home/tyy/miniconda3/envs/zeroError/bin/python gui/main.py
+python gui/main.py
 ```
 
 ### 安装为桌面应用
@@ -71,12 +77,17 @@ pkexec ./install.sh
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-ctest --test-dir build --output-on-failure          # 43 个单元测试
-python tests/integration_test.py                    # 34 项端到端检查（无需硬件）
+ctest --test-dir build --output-on-failure          # 8 个测试可执行（tests/ 下 glob 自动纳入）
+python tests/integration_test.py                    # 13 节端到端检查（mock，无需硬件）
 ```
 
 单元测试覆盖 CiA402 状态机（含使能序列必须逐级 06→07→0F、Fault Reset 的 bit7 上升沿）、
-物理量换算（用例数字取自真机实测，兼作标定回归保护）、六种轨迹、无锁环形队列并发。
+物理量换算（用例数字取自真机实测，兼作标定回归保护；力矩上下行方向对称性有往返恒等测试）、
+六种轨迹、无锁环形队列并发、线格式契约（`Sample` 184 字节、硬 offsetof 断言）、
+配置解析拒绝路径、HDF5 列一致性（真实 DataLogger 端到端写入）。
+
+`tests/CMakeLists.txt` 用 glob + `CONFIGURE_DEPENDS`：新增 `test_*.cpp` 丢进 `tests/`
+即自动参与构建——杜绝"加了测试文件却静默不参与、ctest 依然全绿"的覆盖率回退。
 
 ---
 
@@ -89,22 +100,38 @@ python tests/integration_test.py                    # 34 项端到端检查（�
 | `config/` | 8 个 yaml：app / ethercat / slave / pdo / scaling / gui / trajectory / controller |
 | `system/` | systemd service、desktop entry、polkit 策略、root helper |
 | `tests/` | 单元测试 + 端到端集成测试 |
-| `tools/` | `h5_to_csv.py` 数据导出 |
-| `docs/` | 架构设计 |
+| `tools/` | `h5_to_csv.py` 数据导出、`verify_pdo_remap.py` PDO 重映射 J1~J6 判据、`rt-tune.sh` 实时调优 |
+| `docs/` | `ARCHITECTURE.md` 架构设计；`superpowers/specs/` 设计文档（经四轮对抗审核的 spec v2）；`superpowers/plans/` 实施计划（P0 止血 + P1 总线采集层，16 任务含真机验证步骤） |
+
+**IgH 行为更正**（写在 `config/pdo.yaml` 头部，曾是本工程的认知错误）：
+IgH 的 `fsm_pdo.c` 是字面的 `// always write PDO mapping`——每次 activate 都**无条件重写**
+全部已分配 PDO 的条目表（包括 Fixed="1" 的）。"断电重启回出厂配置"不是有效回退手段：
+只要 pdo.yaml 没改，重启后端会把同样的映射再写一遍。**唯一回退 = 改配置文件。**
 
 ---
 
 ## 数据
 
 长期存储用 **HDF5 列存**（一字段一 dataset，chunked + gzip），CSV 仅作导出。
-每次采集写入完整 metadata：控制器与参数、周期、采样率、从站标识、
-编码器分辨率、减速比、软件版本、起止时间。
 
-1 kHz × 23 字段 ≈ 190 kB/s，压缩后 10 小时约 2–3 GB。
+**37 列**（协议 v2，`Sample` 184 字节）：双端位置/速度、电流、力矩（`0x6077` 千分比原始值
+与换算 Nm 双份）、**同刻扭转角 `0x2241`**（1 count = 0.0014 输出侧角分）、厂商扭矩估计
+`0x3B69`（派生量，metadata 标注不得用于刚度退化判定）、跟随误差 `0x60F4`、
+**母线电压 `0x6079`**（关节无再生制动电路，摆臂回灌过压是 450 h 头号中断风险，必须连续记录）、
+驱动器温度 `0x22A2`（1 Hz 异步 SDO；非绕组非壳体）、错误/警告码、`seq`/`flags`（事后可查丢包）。
+
+metadata 溯源：git commit（**构建时刷新**，非 configure 时烤死）、config 目录 sha256、
+标定常数及其**来源声明**（手册章节 + 实测依据）、activate 前实读的驱动器参数快照
+（`0x6093` 位置因子、`0x6075` 额定电流——它是可写的，中途被改会让全部历史电流数据标定漂移、
+`0x607D` 软限位、环路增益、`0x1C33` SM 同步诊断）。
+
+1 kHz × 37 字段 ≈ 184 B/样本，压缩后约 10~14 GB / 50 h（节点间最长间隔）。
 
 ```bash
 python tools/h5_to_csv.py data/exp_20260810_163043.h5 --list
 python tools/h5_to_csv.py data/exp_*.h5 --fields elapsed_time_s,motor_velocity_rpm --decimate 10
+python tools/verify_pdo_remap.py --record-baseline     # 真机：PDO 重映射的 J1~J6 判据
+tests/jitter_probe.py                                  # 从遥测流算真实周期分布（别信累计统计）
 ```
 
 ---
@@ -117,7 +144,7 @@ python tools/h5_to_csv.py data/exp_*.h5 --fields elapsed_time_s,motor_velocity_r
 |---|---|
 | 电机侧编码器 | 131072 counts/rev (2^17) |
 | 输出侧编码器 | 524288 counts/rev (2^19)，**已用物理转角验证** |
-| 减速比 | **121 : 1**（铭牌标称 120，实测 Δ0x2240/Δ0x6064 = 30.24 ≈ 121/4） |
+| 减速比 | **121 : 1**。依据：模组手册 §12「n_out = n_motor/(X+1)，波发生器输入、刚轮输出、柔轮固定」+ §2 表2-1「输出端转一圈，电机端转减速比+1 圈」；实测 Δ0x2240/Δ0x6064 = 30.234（自身精度 ~0.05%，足以排除 120，理论值 121/4 = 30.25） |
 | `0x60FF` 单位 | `0x6064` 的 counts/s，`velocity_gain_correction` 现为 1.0（未应用任何实测速度标定） |
 | 电机侧 100 rpm | `0x60FF ≈ 7207`（实测 99.89 rpm） |
 | 额定电流 / 力矩 | 6300 mA / 31000 mNm |
@@ -138,6 +165,28 @@ python tools/h5_to_csv.py data/exp_*.h5 --fields elapsed_time_s,motor_velocity_r
 | 2^20 | 约 90° |
 
 实测走了 263509 counts，记号停在对面 → **2^19 确认**。
+
+---
+
+## 安全设计（P0 止血，2026-08-11 经四轮对抗审核后落地）
+
+这些不是锦上添花，每一条背后都是会损坏硬件或毁掉 450 h 实验的真实缺陷：
+
+1. **CSP 停止 = 保持当前实测位置**（不是"Run 起始位置"——原实现会在轨迹跑完后
+   把位置指令跳回起点，CSP 下驱动器不做 profile 限制，那是一次全速位置阶跃）。
+   另有兜底：目标与实测偏差 > `csp_target_jump_deg_max`（默认 5°）即拒绝下发并软停。
+2. **撤使能门控**：手册 §7.1 规定制动器只许在 <10% 最大转速（输出 **2.5 rpm**）下动态制动，
+   违者「对运动组件造成永久性损坏」。任何 DisableVoltage 请求都被 RT 主循环扣住，
+   软停到 2.5 rpm 以下才放行（15 s 超时兜底）；且只在当前有力矩（OperationEnabled）时介入，
+   避免被反驱的关节自励磁。停主站序列等软停实际完成（关机看门狗预算 40 s 与之联动推导）。
+3. **GUI 三个危险入口门控**：运行中点 Servo Disable 弹确认（文案如实：会先软停再切电）；
+   停主站运行中拦下；新增【安全停机】按钮。
+4. **IPC 慢客户端**：200 ms 发送超时 + 丢帧；**半帧撕裂即断开**（长度前缀协议无重同步，
+   静默错位比断连可怕）；累计丢帧踢出 + **30 s 重连宽限期**——GUI 冻结一分钟不再等于
+   中止 450 h 实验。
+5. **快停选项码 `0x605A=2` 显式下发**（受控减速），不再依赖驱动器 NVM 里碰巧存了什么。
+6. **绝不写 `0x1010`**（Store Parameters）——本工程对驱动器 Flash 零改动，
+   所有 PDO/参数配置都是 RAM 态、断电即回出厂。
 
 ---
 
@@ -207,3 +256,18 @@ RCU 软中断约 690 次/秒、调度 IPI 若干，这些**不受进程亲和性
 
 **GUI 一行都不用改。** `cst_custom` 已经是预留好的接入点，
 参数按自适应/神经网络控制的常用命名（γ、λ、学习率、摩擦补偿）留好了。
+
+---
+
+## Python 环境
+
+GUI 与工具脚本需要：PySide6 ≥ 6.5、pyqtgraph、numpy、h5py。本机使用 conda 环境 `zeroError`
+（`conda create -n zeroError -c conda-forge --override-channels pyside6 pyqtgraph numpy h5py`——
+Anaconda 默认频道会被 ToS 拦住，必须 `-c conda-forge --override-channels`）。
+文中 `python` 均指该环境的解释器。
+
+## 许可与致谢
+
+上位机代码为本项目自研。ESI 文件与对象字典定义版权归 ZeroErr（零差云控）所有；
+IgH EtherCAT Master 遵循其自身许可（GPL）。
+开发过程中的对抗审核记录与实验计划修订建议见 `docs/superpowers/`。
