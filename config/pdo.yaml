@@ -74,6 +74,13 @@ pdo:
     #   entries:
     #     - {index: 0x2240, sub: 0x00, bits: 32, type: i32, name: motor_position}
     #     - {index: 0x2241, sub: 0x00, bits: 32, type: i32, name: twist_counts}
+    #
+    # ⚠ 放开步骤（终审 finding M3）：0x2241 一旦随 0x1A00 进了 PDO，必须同时把
+    #   下面 async_sdo 列表里的 0x2241 条目（dual_encoder_diff）注释掉——
+    #   两条链路同时问同一个对象，白耗 10Hz 邮箱带宽，还会各自维护一份
+    #   errors 计数，排查时分不清告警是哪条链路报的。
+    #   0x2240 的 async_sdo 条目不受影响：它保留作 J3 对拍用（见下面那条的
+    #   注释），divisor 随 Task 15 一起降到 10，但不注释掉。
 
 # ── 电机侧位置：只能异步 SDO ──────────────────────────────────────────────
 # 0x2240 "Motor Encoder Position" 不在任何 PDO 里（已遍历 ESI 全部 RxPdo/TxPdo 确认）。
@@ -81,9 +88,11 @@ pdo:
 # 代价：它的采样时刻与 PDO 不同步，短窗口内会有偏移——标定时窗口要取长（≥30s）。
 async_sdo:
   # 0x2240 在 Task 14 之后会进 PDO；这条通道保留作 J3 对拍用（写入 motor_position_sdo）。
-  # poll_divisor 从 1 改到 10：Task 14 前它还兼任主链路（填 motor_position），
-  # 但对拍精度不需要每拍都问一次，10 拍一次足够、也给其余异步 SDO 让带宽。
-  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position,    poll_divisor: 10}
+  # poll_divisor 保持 1：当前 0x1A00 仍是注释态，这条异步 SDO 是电机侧位置的
+  # 唯一主链路（填 motor_position），divisor 调高会让有效更新周期退化到
+  # 10~15ms（终审 finding I1）。Task 15 放开 0x1A00、PDO 通道接管主链路后，
+  # 再随那次改动把它降到 10——那时这条通道只用于 J3 对拍，不需要每拍都问。
+  - {index: 0x2240, sub: 0x00, type: i32, name: motor_position,    poll_divisor: 1}
   - {index: 0x2241, sub: 0x00, type: i32, name: dual_encoder_diff, poll_divisor: 100}
   # 0x22A2 在 ESI 里没有 PdoMapping 标志，只能走 SDO。
   # ⚠ 这是驱动器温度，不是绕组温度、更不是关节壳体温度。
