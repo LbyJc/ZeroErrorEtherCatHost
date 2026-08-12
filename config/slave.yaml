@@ -41,17 +41,34 @@ slave:
         实时线程偶发毫秒级抖动 → 帧错过 DC 同步窗口 → 驱动器判定通信异常。
         对策见 ethercat.yaml 里 cycle_us 的注释。
 
-  # 空行占位（下面的 startup_sdo 是与 slave 同级的顶层键）
+  # 空行占位（下面的 diagnostic_sdos / startup_sdo 都是与 slave 同级的顶层键——
+  # config.cpp 解析时按 n["diagnostic_sdos"] 从根节点取，不是 n["slave"]["diagnostic_sdos"]，
+  # 缩进进 slave: 块下面的话会被静默解析成空列表，Task 13 之前那 6 条就是这样从未被真正加载过）
 
-  # 只在 activate 之前 / deactivate 之后读的诊断 SDO（阻塞式）
-  # ⚠ 绝不可在 OP 期间阻塞式读，会导致进程 D 状态死锁、只能重启机器
-  diagnostic_sdos:
-    - {index: 0x1001, sub: 0, type: u8,  name: "error_register"}
-    - {index: 0x1003, sub: 0, type: u8,  name: "error_history_count"}
-    - {index: 0x6079, sub: 0, type: u32, name: "dc_link_voltage_mV"}
-    - {index: 0x22A2, sub: 0, type: u16, name: "drive_temperature"}
-    - {index: 0x6075, sub: 0, type: u32, name: "rated_current_mA"}
-    - {index: 0x6076, sub: 0, type: u32, name: "rated_torque_mNm"}
+# 只在 activate 之前 / deactivate 之后读的诊断 SDO（阻塞式）
+# ⚠ 绝不可在 OP 期间阻塞式读，会导致进程 D 状态死锁、只能重启机器
+diagnostic_sdos:
+  - {index: 0x1001, sub: 0x00, type: u8,  name: "error_register"}
+  - {index: 0x100A, sub: 0x00, type: u32, name: "firmware_version"}
+  - {index: 0x1018, sub: 0x04, type: u32, name: "serial_number"}
+  - {index: 0x6079, sub: 0x00, type: u32, name: "dc_link_voltage_mV"}
+  - {index: 0x22A2, sub: 0x00, type: u16, name: "drive_temperature_C"}
+  # ── 标定依赖项：全试验期间必须锁定不变 ──
+  - {index: 0x6075, sub: 0x00, type: u32, name: "rated_current_mA"}
+  - {index: 0x6076, sub: 0x00, type: u32, name: "rated_torque_mNm"}
+  - {index: 0x6093, sub: 0x01, type: u32, name: "position_factor_numerator"}
+  - {index: 0x6093, sub: 0x02, type: u32, name: "position_factor_divisor"}
+  - {index: 0x607D, sub: 0x01, type: i32, name: "position_limit_min"}
+  - {index: 0x607D, sub: 0x02, type: i32, name: "position_limit_max"}
+  # ── 环路增益：影响 §4.7/§4.8 的六个指标，0h 后禁改 ──
+  - {index: 0x2381, sub: 0x01, type: u32, name: "vel_loop_kp"}
+  - {index: 0x2381, sub: 0x02, type: u32, name: "vel_loop_ki"}
+  - {index: 0x2382, sub: 0x01, type: u32, name: "pos_loop_kp"}
+  # ── SM 同步诊断：直接量化 0xA000 的根因，改映射前后各读一次 ──
+  - {index: 0x1C33, sub: 0x04, type: u16, name: "sm_in_min_cycle_ns"}
+  - {index: 0x1C33, sub: 0x05, type: u16, name: "sm_in_calc_copy_ns"}
+  - {index: 0x1C33, sub: 0x09, type: u16, name: "sm_in_event_missed"}
+  - {index: 0x1C33, sub: 0x0A, type: u16, name: "sm_in_cycle_too_small"}
 
 # ── 启动时下发给驱动器的参数 ─────────────────────────────────────────────
 # 在 activate 之前用阻塞式 SDO 写（此时相位合法）。

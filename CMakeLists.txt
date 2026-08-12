@@ -23,6 +23,25 @@ if(NOT ECRT_INCLUDE_DIR OR NOT ECRT_LIBRARY)
 endif()
 message(STATUS "IgH EtherCAT: ${ECRT_LIBRARY}")
 
+# ── Git commit（metadata 落地用，Task 13）──────────────────────────────────
+# 构建目录不在 git 仓库里（例如从 tarball 构建、.git 被裁掉）时优雅降级为
+# "unknown"，不让配置失败：这是可选的追溯信息，不是编译前提。
+set(ECJC_GIT_COMMIT "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE ECJC_GIT_COMMIT_OUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE ECJC_GIT_RESULT)
+  if(ECJC_GIT_RESULT EQUAL 0 AND NOT ECJC_GIT_COMMIT_OUT STREQUAL "")
+    set(ECJC_GIT_COMMIT "${ECJC_GIT_COMMIT_OUT}")
+  endif()
+endif()
+message(STATUS "Git commit: ${ECJC_GIT_COMMIT}")
+
 # ── yaml-cpp ─────────────────────────────────────────────────────────────
 find_package(yaml-cpp QUIET)
 if(NOT yaml-cpp_FOUND)
@@ -64,6 +83,7 @@ add_executable(ecjc-backend
 )
 target_include_directories(ecjc-backend PRIVATE ${ECRT_INCLUDE_DIR} ${HDF5_INCLUDE_DIRS})
 target_link_libraries(ecjc-backend PRIVATE ecjc_core ${ECRT_LIBRARY} ${HDF5_LIBRARIES} pthread rt)
+target_compile_definitions(ecjc-backend PRIVATE ECJC_GIT_COMMIT="${ECJC_GIT_COMMIT}")
 
 # ── 单元测试 ─────────────────────────────────────────────────────────────
 enable_testing()

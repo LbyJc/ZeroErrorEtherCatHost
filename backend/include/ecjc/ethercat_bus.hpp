@@ -6,7 +6,9 @@
 // 不是"数据结构相同"，而是**整条链路只有最底下一层被替换**。
 #pragma once
 
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -71,6 +73,16 @@ public:
                                  std::string* err) = 0;
     virtual bool blockingSdoWrite(uint16_t index, uint8_t sub, const void* buf,
                                   size_t size, std::string* err) = 0;
+
+    /// activate 前一次性读到的全部诊断 SDO（Task 13，slave.yaml 的
+    /// diagnostic_sdos）。key 是配置里的 name，value 是解码后的整型；
+    /// 读失败的条目值为 INT64_MIN（哨兵，metadata 落地时转成 "read_failed"）。
+    /// 默认空实现：Mock 下没有真实驱动器可读，宁可让 metadata 里 sdo_* 属性
+    /// 整体缺席，也不伪造假值。IghBus 覆写为返回真实读到的表。
+    virtual const std::map<std::string, int64_t>& diagnostics() const {
+        static const std::map<std::string, int64_t> kEmpty;
+        return kEmpty;
+    }
 
     virtual bool isMock() const = 0;
 };

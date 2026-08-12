@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -195,6 +196,28 @@ bool DataLogger::openFile(std::string* err) {
     attrStr("encoder_resolution_verified",
             meta_.encoder_resolution_verified ? "true"
                 : "false (输出侧分辨率未经物理转角验证；若实为2^18则所有rpm翻倍)");
+
+    // ── 标定来源声明（Task 13：审核定稿口径，逐字照抄，不得改写）────────
+    attrStr("gear_ratio_source",
+            "手册§12 n_out=n_motor/(X+1) + §2表2-1；实测 Δ0x2240/Δ0x6064=30.234"
+            "（自身精度仅 0.05%，足以排除 120 不足以细分）");
+    attrStr("encoder_accuracy_note",
+            "型号说明称 HM 可提供 20 位/±7角秒；表2-2 eRob80H 选装配置列 19Bit/±10角秒；待厂家澄清");
+    attrStr("torque_est_source",
+            "0x3B69 与 0x2241 同源同刻计算，驱动器手册称『估计』，全机无独立力传感元件；"
+            "不得用于刚度退化判定");
+    attrStr("temperature_scope",
+            "仅驱动器温度 0x22A2，非绕组非壳体；单位未经手册核实（eTuner 界面显示为 ℃）；"
+            "异步 SDO，采样时刻与 PDO 不同步");
+    attrStr("twist_sign_convention",
+            "theta_twist = theta_out - theta_in/i（与计划§4.4 TE 同号）");
+    attrStr("git_commit",   meta_.git_commit);
+    attrStr("config_sha256", meta_.config_sha256);
+    // 全部诊断 SDO 实读值（activate 前一次性读，见 IEtherCATBus::diagnostics()）
+    for (const auto& kv : meta_.diagnostics) {
+        if (kv.second == INT64_MIN) attrStr(("sdo_" + kv.first).c_str(), "read_failed");
+        else                        attrDbl(("sdo_" + kv.first).c_str(), (double)kv.second);
+    }
 
     // ── 建列 ───────────────────────────────────────────────────────
     // 列名/类型的唯一数据源是 ECJC_SAMPLE_COLUMNS（data_logger.hpp）：

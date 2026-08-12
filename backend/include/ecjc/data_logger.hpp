@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +38,13 @@ struct RecordingMeta {
     std::string software_version;
     std::string start_time;
     std::string end_time;
+
+    // ── Task 13：数据能绑回代码版本与驱动器标定状态 ──────────────────
+    std::string git_commit;      ///< main.cpp 用 CMake 注入的宏填充；非 git 构建环境降级为 "unknown"
+    std::string config_sha256;   ///< config/ 目录下全部 yaml 拼接后的 sha256，启动时算一次
+    /// activate 前一次性读到的诊断 SDO（IEtherCATBus::diagnostics()）。
+    /// 读失败的条目值为 INT64_MIN，写 metadata 时转成 "read_failed" 字符串属性。
+    std::map<std::string, int64_t> diagnostics;
 };
 
 struct RecordingStatus {

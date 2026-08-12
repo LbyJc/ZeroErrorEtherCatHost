@@ -94,6 +94,13 @@ struct AppCfg {
     std::string data_dir = "data";
     std::string log_dir = "logs";
     std::string log_level = "INFO";
+
+    // ── Task 13：运行期计算，不来自 yaml ──────────────────────────────
+    // main.cpp 在 loadConfig() 之后、装配 RealtimeTask/DataLogger/IpcServer
+    // 之前填充；ipc_server.cpp 的 record_start 处理器从这里读出写进
+    // RecordingMeta，让数据文件能绑回代码版本与配置内容。
+    std::string git_commit = "unknown";
+    std::string config_sha256;
 };
 
 struct GuiCfg {

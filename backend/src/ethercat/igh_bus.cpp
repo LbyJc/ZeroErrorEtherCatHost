@@ -17,6 +17,7 @@
 
 #include <ecrt.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -160,6 +161,42 @@ public:
     bool activate(const StepReporter& rep, std::string* err) override {
         if (!master_ || !domain_) { *err = "内部错误：主站或 domain 未初始化"; return false; }
 
+        // ── 诊断 SDO 一次性读取（Task 13）────────────────────────────
+        // 此刻相位仍是 PreActivate（activate() 成功之前 phase_ 还没翻到
+        // Active），guardBlocking() 会放行。这是全程唯一一处能安全阻塞读
+        // 0x6093/0x6075 这类"只在启动前读一次、OP 期间绝不能碰"的对象的
+        // 窗口——OP 期间调用阻塞式 SDO 会让进程进入 D 状态、fd 永不释放，
+        // 只能重启机器（见文件头的血泪教训）。
+        diagnostics_.clear();
+        for (const auto& d : cfg_.slave.diagnostic_sdos) {
+            int64_t v = 0;
+            std::string e;
+            if (blockingSdoReadTyped(d.index, d.sub, d.type, &v, &e)) {
+                diagnostics_[d.name] = v;
+            } else {
+                fprintf(stderr, "[WARN] 诊断 SDO 0x%04X:%02X (%s) 读取失败: %s\n",
+                        d.index, d.sub, d.name.c_str(), e.c_str());
+                diagnostics_[d.name] = INT64_MIN;   // 哨兵值，metadata 里写 "read_failed"
+            }
+        }
+        // 位置因子非 1:1 是静默错误的最大来源，单独校验一次：
+        // CiA402 里 0x6064 是用户单位、由 0x6093 换算，工程若把它当原始
+        // counts 用，偏差会在全部角度换算里静默传播。这里还在非 RT 的
+        // 启动上下文，用普通 log 合法（RT 循环尚未开始，没有 snap_.last_error
+        // 那一套确定性延迟约束）。
+        {
+            auto num = diagnostics_.find("position_factor_numerator");
+            auto div = diagnostics_.find("position_factor_divisor");
+            if (num != diagnostics_.end() && div != diagnostics_.end() &&
+                num->second != INT64_MIN && div->second != INT64_MIN &&
+                num->second != div->second) {
+                fprintf(stderr,
+                        "[WARN] 0x6093 位置因子不是 1:1（%lld/%lld）——"
+                        "全部角度换算需按该因子修正！\n",
+                        (long long)num->second, (long long)div->second);
+            }
+        }
+
         if (ecrt_master_activate(master_)) {
             *err = "ecrt_master_activate() 失败。常见原因：PDO 映射与 ESI 不符、"
                    "或另一个进程正占用主站（检查 `ethercat master` 的 Active 字段）。";
@@ -256,6 +293,7 @@ public:
         std::memset(offsets_, 0, sizeof offsets_);
         motor_position_in_pdo_ = false;
         twist_in_pdo_ = false;
+        diagnostics_.clear();
     }
 
     void receive() override {
@@ -428,7 +466,30 @@ public:
         return true;
     }
 
+    const std::map<std::string, int64_t>& diagnostics() const override { return diagnostics_; }
+
 private:
+    /// blockingSdoRead() 的类型化包装：按 DiagnosticSdoCfg::type 把读到的字节
+    /// 解码成 int64_t。与 pollAsyncSdo() 的类型分派表同源同选择——未识别的
+    /// type 字符串回落到有符号 32 位（s32），不是因为它"正确"，而是与
+    /// pollAsyncSdo 保持一致，不引入第二套回落规则。
+    bool blockingSdoReadTyped(uint16_t index, uint8_t sub, const std::string& type,
+                              int64_t* out, std::string* err) {
+        const size_t sz = (type == "u8"  || type == "i8")  ? 1
+                         : (type == "u16" || type == "i16") ? 2 : 4;
+        uint8_t buf[8] = {0};
+        size_t rs = 0;
+        if (!blockingSdoRead(index, sub, buf, sz, &rs, err)) return false;
+
+        if      (type == "u8")  *out = EC_READ_U8(buf);
+        else if (type == "i8")  *out = EC_READ_S8(buf);
+        else if (type == "u16") *out = EC_READ_U16(buf);
+        else if (type == "i16") *out = EC_READ_S16(buf);
+        else if (type == "u32") *out = EC_READ_U32(buf);
+        else                    *out = EC_READ_S32(buf);   // i32 及未知类型回落
+        return true;
+    }
+
     struct AsyncReq { ec_sdo_request_t* req; AsyncSdoCfg cfg; uint64_t errors; };
 
     static std::string toHex(uint32_t v) {
@@ -545,6 +606,10 @@ private:
     std::vector<std::string> names_;
     std::map<std::string, unsigned int> off_;
     std::vector<AsyncReq> async_;
+
+    /// activate() 前一次性阻塞读到的诊断 SDO（Task 13）。会话绑定，
+    /// clearSessionState() 里一并清掉，避免重连后残留上一次会话的旧值。
+    std::map<std::string, int64_t> diagnostics_;
 
     // Task 14 之前恒为 false：PDO 里还没有这两个字段，异步 SDO 通道
     // 兼任主链路。构造时机见 configure()：buildPdos() 填完 off_ 之后立即置位。

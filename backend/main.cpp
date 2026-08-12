@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "ecjc/config.hpp"
 #include "ecjc/data_logger.hpp"
@@ -21,11 +23,54 @@
 #include "ecjc/ipc_server.hpp"
 #include "ecjc/realtime_task.hpp"
 
+// CMakeLists.txt 用 execute_process(git rev-parse --short HEAD) 注入。
+// 直接绕开 CMake 编译（例如手写 Makefile/IDE 单文件编译）时这个宏不存在，
+// 下面的 #ifndef 兜底成 "unknown"，不让整个构建因为缺一个可选的追溯字段而炸。
+#ifndef ECJC_GIT_COMMIT
+#define ECJC_GIT_COMMIT "unknown"
+#endif
+
 using namespace ecjc;
 
 namespace {
 volatile std::sig_atomic_t g_quit = 0;
 void onSignal(int) { g_quit = 1; }
+
+/// config 目录下全部 *.yaml 拼接后的 sha256（Task 13）。
+/// 借用系统 sha256sum 而不是手撸一份 SHA-256 实现——启动时算一次，不在热路径，
+/// 没有必须自己实现的理由。任何一步失败（目录不存在、sha256sum 不在 PATH…）
+/// 都优雅降级为 "unknown"，不阻塞后端启动：这是追溯信息，不是启动前提。
+std::string computeConfigSha256(const std::string& dir) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec) || ec) return "unknown";
+
+    std::vector<std::string> files;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) return "unknown";
+        if (e.path().extension() == ".yaml") files.push_back(e.path().string());
+    }
+    if (files.empty()) return "unknown";
+    std::sort(files.begin(), files.end());   // 固定顺序，哈希才可复现
+
+    std::string cmd = "cat";
+    for (const auto& f : files) {
+        cmd += " '";
+        for (char c : f) { if (c == '\'') cmd += "'\\''"; else cmd += c; }
+        cmd += "'";
+    }
+    cmd += " 2>/dev/null | sha256sum 2>/dev/null";
+
+    FILE* p = ::popen(cmd.c_str(), "r");
+    if (!p) return "unknown";
+    char buf[256] = {0};
+    const bool got = ::fgets(buf, sizeof buf, p) != nullptr;
+    const int rc = ::pclose(p);
+    if (!got || rc != 0) return "unknown";
+
+    const std::string out(buf);
+    const auto sp = out.find(' ');
+    return sp == std::string::npos ? "unknown" : out.substr(0, sp);
+}
 
 /// 单实例保护。
 ///
@@ -132,7 +177,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "配置加载失败: %s\n", err.c_str());
         return 1;
     }
-    printf("[INFO] 配置已加载: %s\n", config_dir.c_str());
+    cfg.app.git_commit = ECJC_GIT_COMMIT;
+    cfg.app.config_sha256 = computeConfigSha256(config_dir);
+    printf("[INFO] 配置已加载: %s (git=%s, config_sha256=%s)\n",
+           config_dir.c_str(), cfg.app.git_commit.c_str(), cfg.app.config_sha256.c_str());
     printf("[INFO] 模式: %s | 周期: %u us | 网卡: %s\n",
            mock ? "MOCK (无硬件)" : "真实 EtherCAT",
            cfg.ethercat.cycle_us, cfg.ethercat.interface.c_str());

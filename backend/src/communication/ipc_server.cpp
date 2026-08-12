@@ -859,6 +859,9 @@ void IpcServer::handleLine(const std::string& line) {
         m.gear_ratio            = cfg_.scaling.gear_ratio;
         m.encoder_resolution_verified = cfg_.scaling.resolution_verified;
         m.software_version = cfg_.app.version;
+        m.git_commit    = cfg_.app.git_commit;
+        m.config_sha256 = cfg_.app.config_sha256;
+        if (rt_->bus()) m.diagnostics = rt_->bus()->diagnostics();
         {
             std::ostringstream ps;
             const auto metas = rt_->params().metas();

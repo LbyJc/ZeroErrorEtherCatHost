@@ -78,6 +78,9 @@ public:
 
     const FullConfig& config() const { return cfg_; }
     const Scaling& scaling() const { return scaling_; }
+    /// Task 13：ipc_server.cpp 的 record_start 处理器靠它读 bus_->diagnostics()
+    /// 填进 RecordingMeta。
+    IEtherCATBus* bus() const { return bus_; }
 
     void setRecording(bool on) { recording_.store(on, std::memory_order_relaxed); }
     void setRecordEpoch(int64_t ns) { record_epoch_ns_.store(ns, std::memory_order_relaxed); }
