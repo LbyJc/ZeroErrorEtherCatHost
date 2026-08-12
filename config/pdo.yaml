@@ -3,7 +3,12 @@
 # 依据 ESI 文件 ZeroErr+Driver_V3.2.0.xml。规矩（第一次配错踩过）：
 #   · 除 0x1600 / 0x1A00 是 Fixed="0" 外，其余 PDO 全是 Fixed="1"
 #   · 正确做法是用 0x1C12 / 0x1C13 **分配**厂商预定义的 PDO，不要重写条目表
-#   · 下面 entries 逐条抄自 ESI，顺序和位宽必须完全一致，IgH 比对一致后就不会去改映射
+#   · 下面 entries 逐条抄自 ESI，顺序和位宽必须完全一致
+#
+# ⚠ 更正（2026-08-11）：此前这里写"一致时 IgH 不会去写映射寄存器，只做 0x1C12/0x1C13 分配"，
+#   这是错的。IgH 的 master/fsm_pdo.c 里注释就是字面的 "// always write PDO mapping"——
+#   每次 activate 都无条件重写全部已分配 PDO 的条目表，包括所有 Fixed="1" 的。
+#   反过来说：现在这套配置能跑到 OP，恰恰证明这台驱动器接受条目表改写。
 #
 # RxPDO 选 0x1605 而不是 0x1609：0x1609 缺 0x6071 目标力矩，CST 模式没法用。
 # 0x1605 一个 PDO 同时带 目标位置/目标速度/目标力矩/最大力矩/控制字/运行模式，
@@ -47,6 +52,12 @@ pdo:
         - {index: 0x3B68, sub: 0x00, bits: 32, type: u32, name: warning_code}
         - {index: 0x3B69, sub: 0x00, bits: 32, type: i32, name: vendor_torque}
         - {index: 0x3B6A, sub: 0x00, bits: 16, type: i16, name: torque_ratio}
+    - index: 0x1A18
+      entries:
+        - {index: 0x6079, sub: 0x00, bits: 32, type: u32, name: dc_link_voltage}
+    - index: 0x1A19
+      entries:
+        - {index: 0x60F4, sub: 0x00, bits: 32, type: i32, name: following_error}
 
 # ── 电机侧位置：只能异步 SDO ──────────────────────────────────────────────
 # 0x2240 "Motor Encoder Position" 不在任何 PDO 里（已遍历 ESI 全部 RxPdo/TxPdo 确认）。

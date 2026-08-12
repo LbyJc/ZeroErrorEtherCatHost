@@ -280,6 +280,10 @@ public:
         io->position_counts = rd32("position_counts");
         io->current_actual  = rd16s("current_actual");
         io->warning_code    = rdu32("warning_code");
+        io->vendor_torque   = rd32("vendor_torque");      // 0x3B69，此前已映射但从未读
+        io->torque_ratio    = rd16s("torque_ratio");      // 0x3B6A，同上
+        io->dc_link_mV      = rdu32("dc_link_voltage");   // 0x6079，新增映射
+        io->following_error = rd32("following_error");    // 0x60F4，新增映射
     }
 
     void writeOutputs(const RawIo& io) override {
