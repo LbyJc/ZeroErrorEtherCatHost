@@ -81,7 +81,19 @@ struct RecordingStatus {
     X(ethercat_state,               H5T_NATIVE_UINT8,  U8,  s[i].ethercat_state)  \
     X(working_counter,              H5T_NATIVE_UINT32, U32, s[i].working_counter) \
     X(seq,                          H5T_NATIVE_UINT32, U32, s[i].seq)             \
-    X(flags,                        H5T_NATIVE_UINT8,  U8,  s[i].flags)
+    X(flags,                        H5T_NATIVE_UINT8,  U8,  s[i].flags)           \
+    X(twist_counts,           H5T_NATIVE_INT32,  I32, s[i].twist_counts)           \
+    X(following_error_counts, H5T_NATIVE_INT32,  I32, s[i].following_error_counts) \
+    X(torque_est_mNm,         H5T_NATIVE_INT32,  I32, s[i].torque_est_mNm)         \
+    X(aux_position_raw,       H5T_NATIVE_INT32,  I32, s[i].aux_position_raw)       \
+    X(position_counts_raw,    H5T_NATIVE_INT32,  I32, s[i].position_counts_raw)    \
+    X(motor_position_sdo,     H5T_NATIVE_INT32,  I32, s[i].motor_position_sdo)     \
+    X(dc_link_voltage_mV,     H5T_NATIVE_UINT32, U32, s[i].dc_link_voltage_mV)     \
+    X(warning_code,           H5T_NATIVE_UINT32, U32, s[i].warning_code)           \
+    X(error_code,             H5T_NATIVE_UINT16, U16, s[i].error_code)             \
+    X(temperature_drive_C,    H5T_NATIVE_UINT16, U16, s[i].temperature_drive_C)    \
+    X(torque_actual_permille, H5T_NATIVE_INT16,  I16, s[i].torque_actual_permille) \
+    X(torque_ratio,           H5T_NATIVE_INT16,  I16, s[i].torque_ratio)
 
 /// 列总数（等于 kCols[] 的元素个数）
 size_t sampleColumnCount();

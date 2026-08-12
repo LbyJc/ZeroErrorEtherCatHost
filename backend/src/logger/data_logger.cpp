@@ -66,6 +66,7 @@ struct DataLogger::Impl {
     std::vector<int32_t> scratch_i32;
     std::vector<uint32_t> scratch_u32;
     std::vector<uint16_t> scratch_u16;
+    std::vector<int16_t>  scratch_i16;
     std::vector<uint8_t>  scratch_u8;
     std::vector<int8_t>   scratch_i8;
     std::vector<Sample> batch;
@@ -79,6 +80,7 @@ DataLogger::DataLogger(const FullConfig& cfg, SpscRing<Sample>* ring)
     impl_->scratch_i32.resize(kBatch);
     impl_->scratch_u32.resize(kBatch);
     impl_->scratch_u16.resize(kBatch);
+    impl_->scratch_i16.resize(kBatch);
     impl_->scratch_u8.resize(kBatch);
     impl_->scratch_i8.resize(kBatch);
     th_ = std::thread([this] { threadMain(); });
@@ -258,6 +260,7 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
     auto& i32 = impl_->scratch_i32;
     auto& u32 = impl_->scratch_u32;
     auto& u16 = impl_->scratch_u16;
+    auto& i16 = impl_->scratch_i16;
     auto& u8  = impl_->scratch_u8;
     auto& i8  = impl_->scratch_i8;
 
@@ -266,6 +269,7 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
 #define COL_I32(expr){ for (size_t i=0;i<n;++i) i32[i]= (expr); if(!extend(impl_->cols[k++], i32.data())) goto fail; }
 #define COL_U32(expr){ for (size_t i=0;i<n;++i) u32[i]= (expr); if(!extend(impl_->cols[k++], u32.data())) goto fail; }
 #define COL_U16(expr){ for (size_t i=0;i<n;++i) u16[i]= (expr); if(!extend(impl_->cols[k++], u16.data())) goto fail; }
+#define COL_I16(expr){ for (size_t i=0;i<n;++i) i16[i]= (expr); if(!extend(impl_->cols[k++], i16.data())) goto fail; }
 #define COL_U8(expr) { for (size_t i=0;i<n;++i) u8[i] = (expr); if(!extend(impl_->cols[k++], u8.data()))  goto fail; }
 #define COL_I8(expr) { for (size_t i=0;i<n;++i) i8[i] = (expr); if(!extend(impl_->cols[k++], i8.data()))  goto fail; }
 
@@ -280,6 +284,7 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
 #undef COL_I32
 #undef COL_U32
 #undef COL_U16
+#undef COL_I16
 #undef COL_U8
 #undef COL_I8
 

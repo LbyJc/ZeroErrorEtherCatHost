@@ -62,6 +62,15 @@ public:
         io->current_actual  = static_cast<int16_t>(std::lround(current_permille_));
         io->modes_display   = mode_display_;
         io->warning_code    = 0;
+
+        // 固定可辨识假值：不从 cfg_.scaling 反算，避免标定测试变成同义反复
+        io->twist_counts       = 1500;      // 约 2.04 角分，便于肉眼核对
+        io->following_error    = 120;
+        io->vendor_torque      = 8200;      // mNm
+        io->torque_ratio       = 265;
+        io->dc_link_mV         = 48000;
+        io->drive_temp_C       = 38;
+        io->motor_position_sdo = io->motor_position;   // mock 里两路一致
     }
 
     void writeOutputs(const RawIo& io) override { cmd_ = io; }

@@ -541,11 +541,23 @@ void RealtimeTask::buildSample(Sample* s, int64_t now_ns) {
 
     s->motor_position_raw  = joint_.motor_pos_raw;
     s->output_position_raw = joint_.output_pos_raw;
+    s->twist_counts            = raw_.twist_counts;
+    s->following_error_counts  = raw_.following_error;
+    s->torque_est_mNm          = raw_.vendor_torque;
+    s->aux_position_raw        = raw_.output_position;
+    s->position_counts_raw     = raw_.position_counts;
+    s->motor_position_sdo      = raw_.motor_position_sdo;
+    s->dc_link_voltage_mV      = raw_.dc_link_mV;
+    s->warning_code            = raw_.warning_code;
     s->working_counter     = snap_.bus.working_counter;
     s->seq                 = static_cast<uint32_t>(cycle_count_);
 
     s->controlword = raw_.controlword;
     s->statusword  = raw_.statusword;
+    s->error_code             = raw_.error_code;
+    s->temperature_drive_C    = raw_.drive_temp_C;
+    s->torque_actual_permille = raw_.torque_actual;
+    s->torque_ratio           = raw_.torque_ratio;
     s->operation_mode = raw_.modes_display;
     s->cia402_state   = static_cast<uint8_t>(cia_.state());
     s->ethercat_state = static_cast<uint8_t>(snap_.bus.slave_state);
