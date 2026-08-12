@@ -42,6 +42,10 @@ add_library(ecjc_core STATIC
   backend/src/controllers/controller.cpp
   backend/src/parameter/parameter.cpp
   backend/src/config.cpp
+  backend/src/mock/mock_bus.cpp
+  backend/src/realtime/realtime_task.cpp
+  backend/src/communication/ipc_server.cpp
+  backend/src/logger/data_logger.cpp
 )
 target_include_directories(ecjc_core PUBLIC backend/include)
 if(yaml-cpp_FOUND)
@@ -50,15 +54,13 @@ else()
   target_include_directories(ecjc_core PUBLIC ${YAMLCPP_INC})
   target_link_libraries(ecjc_core PUBLIC ${YAMLCPP_LIB})
 endif()
+target_include_directories(ecjc_core PUBLIC ${HDF5_INCLUDE_DIRS} /usr/local/include)
+target_link_libraries(ecjc_core PUBLIC ${HDF5_LIBRARIES} pthread)
 
 # ── Backend 可执行 ───────────────────────────────────────────────────────
 add_executable(ecjc-backend
   backend/main.cpp
   backend/src/ethercat/igh_bus.cpp
-  backend/src/mock/mock_bus.cpp
-  backend/src/realtime/realtime_task.cpp
-  backend/src/communication/ipc_server.cpp
-  backend/src/logger/data_logger.cpp
 )
 target_include_directories(ecjc-backend PRIVATE ${ECRT_INCLUDE_DIR} ${HDF5_INCLUDE_DIRS})
 target_link_libraries(ecjc-backend PRIVATE ecjc_core ${ECRT_LIBRARY} ${HDF5_LIBRARIES} pthread rt)
