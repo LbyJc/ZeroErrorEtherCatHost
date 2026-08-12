@@ -338,6 +338,11 @@ public:
         io->torque_ratio    = rd16s("torque_ratio");      // 0x3B6A，同上
         io->dc_link_mV      = rdu32("dc_link_voltage");   // 0x6079，新增映射
         io->following_error = rd32("following_error");    // 0x60F4，新增映射
+
+        // Task 15 放开 0x1A00 注释后由标志自动接管；标志为 false 时绝不能无条件读——
+        // rd32 对缺失名返回 0，会每拍把异步 SDO 填的值清零（这正是门控存在的原因）
+        if (motor_position_in_pdo_) io->motor_position = rd32("motor_position");
+        if (twist_in_pdo_)          io->twist_counts   = rd32("twist_counts");
     }
 
     void writeOutputs(const RawIo& io) override {

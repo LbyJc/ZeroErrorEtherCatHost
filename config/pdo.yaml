@@ -72,7 +72,7 @@ pdo:
     # ⚠ Task 15 分级放开：先只放 0x2240，确认进 OP 后再放 0x2241。
     # - index: 0x1A00
     #   entries:
-    #     - {index: 0x2240, sub: 0x00, bits: 32, type: i32, name: motor_position_pdo}
+    #     - {index: 0x2240, sub: 0x00, bits: 32, type: i32, name: motor_position}
     #     - {index: 0x2241, sub: 0x00, bits: 32, type: i32, name: twist_counts}
 
 # ── 电机侧位置：只能异步 SDO ──────────────────────────────────────────────
