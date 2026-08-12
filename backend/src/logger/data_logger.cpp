@@ -67,6 +67,7 @@ struct DataLogger::Impl {
     std::vector<uint32_t> scratch_u32;
     std::vector<uint16_t> scratch_u16;
     std::vector<uint8_t>  scratch_u8;
+    std::vector<int8_t>   scratch_i8;
     std::vector<Sample> batch;
 };
 
@@ -79,6 +80,7 @@ DataLogger::DataLogger(const FullConfig& cfg, SpscRing<Sample>* ring)
     impl_->scratch_u32.resize(kBatch);
     impl_->scratch_u16.resize(kBatch);
     impl_->scratch_u8.resize(kBatch);
+    impl_->scratch_i8.resize(kBatch);
     th_ = std::thread([this] { threadMain(); });
 }
 
@@ -193,30 +195,12 @@ bool DataLogger::openFile(std::string* err) {
                 : "false (输出侧分辨率未经物理转角验证；若实为2^18则所有rpm翻倍)");
 
     // ── 建列 ───────────────────────────────────────────────────────
+    // 列名/类型的唯一数据源是 ECJC_SAMPLE_COLUMNS（data_logger.hpp）：
+    // 建列顺序与写入顺序由同一份宏展开保证一致，不再是靠 k++ 的位置耦合。
     static const struct { const char* n; hid_t t; } kCols[] = {
-        {"system_time_ns", H5T_NATIVE_INT64},
-        {"elapsed_time_s", H5T_NATIVE_DOUBLE},
-        {"motor_position_raw", H5T_NATIVE_INT32},
-        {"motor_position_unwrapped_deg", H5T_NATIVE_DOUBLE},
-        {"motor_position_deg", H5T_NATIVE_DOUBLE},
-        {"motor_velocity_rpm", H5T_NATIVE_DOUBLE},
-        {"output_position_raw", H5T_NATIVE_INT32},
-        {"output_position_unwrapped_deg", H5T_NATIVE_DOUBLE},
-        {"output_position_deg", H5T_NATIVE_DOUBLE},
-        {"output_velocity_rpm", H5T_NATIVE_DOUBLE},
-        {"motor_current_A", H5T_NATIVE_DOUBLE},
-        {"actual_torque_Nm", H5T_NATIVE_DOUBLE},
-        {"target_position_deg", H5T_NATIVE_DOUBLE},
-        {"target_velocity_rpm", H5T_NATIVE_DOUBLE},
-        {"target_torque_Nm", H5T_NATIVE_DOUBLE},
-        {"position_error_deg", H5T_NATIVE_DOUBLE},
-        {"velocity_error_rpm", H5T_NATIVE_DOUBLE},
-        {"controlword", H5T_NATIVE_UINT16},
-        {"statusword", H5T_NATIVE_UINT16},
-        {"operation_mode", H5T_NATIVE_INT8},
-        {"cia402_state", H5T_NATIVE_UINT8},
-        {"ethercat_state", H5T_NATIVE_UINT8},
-        {"working_counter", H5T_NATIVE_UINT32},
+#define X(name, h5type, tag, expr) {#name, h5type},
+        ECJC_SAMPLE_COLUMNS(X)
+#undef X
     };
 
     impl_->cols.clear();
@@ -269,43 +253,27 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
     };
 
     size_t k = 0;
-    auto& d  = impl_->scratch;
+    auto& d   = impl_->scratch;
     auto& i64 = impl_->scratch_i64;
     auto& i32 = impl_->scratch_i32;
     auto& u32 = impl_->scratch_u32;
     auto& u16 = impl_->scratch_u16;
     auto& u8  = impl_->scratch_u8;
+    auto& i8  = impl_->scratch_i8;
 
-#define COL_D(expr) { for (size_t i=0;i<n;++i) d[i]  = (expr); if(!extend(impl_->cols[k++], d.data()))   goto fail; }
+#define COL_D(expr)  { for (size_t i=0;i<n;++i) d[i]  = (expr); if(!extend(impl_->cols[k++], d.data()))   goto fail; }
 #define COL_I64(expr){ for (size_t i=0;i<n;++i) i64[i]= (expr); if(!extend(impl_->cols[k++], i64.data())) goto fail; }
 #define COL_I32(expr){ for (size_t i=0;i<n;++i) i32[i]= (expr); if(!extend(impl_->cols[k++], i32.data())) goto fail; }
 #define COL_U32(expr){ for (size_t i=0;i<n;++i) u32[i]= (expr); if(!extend(impl_->cols[k++], u32.data())) goto fail; }
 #define COL_U16(expr){ for (size_t i=0;i<n;++i) u16[i]= (expr); if(!extend(impl_->cols[k++], u16.data())) goto fail; }
 #define COL_U8(expr) { for (size_t i=0;i<n;++i) u8[i] = (expr); if(!extend(impl_->cols[k++], u8.data()))  goto fail; }
+#define COL_I8(expr) { for (size_t i=0;i<n;++i) i8[i] = (expr); if(!extend(impl_->cols[k++], i8.data()))  goto fail; }
 
-    COL_I64(s[i].system_time_ns)
-    COL_D  (s[i].elapsed_time_s)
-    COL_I32(s[i].motor_position_raw)
-    COL_D  (s[i].motor_position_unwrapped_deg)
-    COL_D  (s[i].motor_position_deg)
-    COL_D  (s[i].motor_velocity_rpm)
-    COL_I32(s[i].output_position_raw)
-    COL_D  (s[i].output_position_unwrapped_deg)
-    COL_D  (s[i].output_position_deg)
-    COL_D  (s[i].output_velocity_rpm)
-    COL_D  (s[i].motor_current_A)
-    COL_D  (s[i].actual_torque_Nm)
-    COL_D  (s[i].target_position_deg)
-    COL_D  (s[i].target_velocity_rpm)
-    COL_D  (s[i].target_torque_Nm)
-    COL_D  (s[i].position_error_deg)
-    COL_D  (s[i].velocity_error_rpm)
-    COL_U16(s[i].controlword)
-    COL_U16(s[i].statusword)
-    COL_U8 (static_cast<uint8_t>(s[i].operation_mode))
-    COL_U8 (s[i].cia402_state)
-    COL_U8 (s[i].ethercat_state)
-    COL_U32(s[i].working_counter)
+    // 写入顺序由 ECJC_SAMPLE_COLUMNS 这一份宏保证与建列顺序（kCols[]）恒等，
+    // 不再依赖人工数手动对齐 k++。
+#define X(name, h5type, tag, expr) COL_##tag(expr)
+    ECJC_SAMPLE_COLUMNS(X)
+#undef X
 
 #undef COL_D
 #undef COL_I64
@@ -313,11 +281,32 @@ bool DataLogger::writeBatch(const Sample* s, size_t n, std::string* err) {
 #undef COL_U32
 #undef COL_U16
 #undef COL_U8
+#undef COL_I8
     return true;
 
 fail:
     *err = "写 HDF5 失败（磁盘满或文件损坏），已停止采集";
     return false;
+}
+
+size_t sampleColumnCount() {
+    size_t c = 0;
+#define X(name, h5type, tag, expr) ++c;
+    ECJC_SAMPLE_COLUMNS(X)
+#undef X
+    return c;
+}
+
+// 与 sampleColumnCount() 用的是同一份宏展开——数量恒等由编译期保证，
+// 不是两处手写数字凑巧一致。
+size_t sampleWriterCount() { return sampleColumnCount(); }
+
+std::vector<std::string> sampleColumnNames() {
+    std::vector<std::string> v;
+#define X(name, h5type, tag, expr) v.push_back(#name);
+    ECJC_SAMPLE_COLUMNS(X)
+#undef X
+    return v;
 }
 
 void DataLogger::threadMain() {

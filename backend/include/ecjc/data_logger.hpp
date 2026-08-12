@@ -9,6 +9,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -49,6 +50,45 @@ struct RecordingStatus {
     double   buffer_usage = 0;
     int64_t  start_time_ns = 0;
 };
+
+// 列定义唯一数据源。加字段只改这一处，列名/类型/取值表达式绑在一起，
+// 位置耦合从根上消除。参数：(列名, HDF5 类型, C++ 缓冲类型标签, 取值表达式)
+//
+// 前 23 列的名称/顺序/HDF5 dtype 与重构前完全一致（既有 HDF5 文件按位置或按名读取
+// 都不受影响）；seq 与 flags 是本次新增的两列，追加在尾部。
+#define ECJC_SAMPLE_COLUMNS(X)                                                    \
+    X(system_time_ns,               H5T_NATIVE_INT64,  I64, s[i].system_time_ns)  \
+    X(elapsed_time_s,               H5T_NATIVE_DOUBLE, D,   s[i].elapsed_time_s)  \
+    X(motor_position_raw,           H5T_NATIVE_INT32,  I32, s[i].motor_position_raw) \
+    X(motor_position_unwrapped_deg, H5T_NATIVE_DOUBLE, D,   s[i].motor_position_unwrapped_deg) \
+    X(motor_position_deg,           H5T_NATIVE_DOUBLE, D,   s[i].motor_position_deg) \
+    X(motor_velocity_rpm,           H5T_NATIVE_DOUBLE, D,   s[i].motor_velocity_rpm) \
+    X(output_position_raw,          H5T_NATIVE_INT32,  I32, s[i].output_position_raw) \
+    X(output_position_unwrapped_deg,H5T_NATIVE_DOUBLE, D,   s[i].output_position_unwrapped_deg) \
+    X(output_position_deg,          H5T_NATIVE_DOUBLE, D,   s[i].output_position_deg) \
+    X(output_velocity_rpm,          H5T_NATIVE_DOUBLE, D,   s[i].output_velocity_rpm) \
+    X(motor_current_A,              H5T_NATIVE_DOUBLE, D,   s[i].motor_current_A)  \
+    X(actual_torque_Nm,             H5T_NATIVE_DOUBLE, D,   s[i].actual_torque_Nm) \
+    X(target_position_deg,          H5T_NATIVE_DOUBLE, D,   s[i].target_position_deg) \
+    X(target_velocity_rpm,          H5T_NATIVE_DOUBLE, D,   s[i].target_velocity_rpm) \
+    X(target_torque_Nm,             H5T_NATIVE_DOUBLE, D,   s[i].target_torque_Nm) \
+    X(position_error_deg,           H5T_NATIVE_DOUBLE, D,   s[i].position_error_deg) \
+    X(velocity_error_rpm,           H5T_NATIVE_DOUBLE, D,   s[i].velocity_error_rpm) \
+    X(controlword,                  H5T_NATIVE_UINT16, U16, s[i].controlword)     \
+    X(statusword,                   H5T_NATIVE_UINT16, U16, s[i].statusword)      \
+    X(operation_mode,               H5T_NATIVE_INT8,   I8,  s[i].operation_mode)  \
+    X(cia402_state,                 H5T_NATIVE_UINT8,  U8,  s[i].cia402_state)    \
+    X(ethercat_state,               H5T_NATIVE_UINT8,  U8,  s[i].ethercat_state)  \
+    X(working_counter,              H5T_NATIVE_UINT32, U32, s[i].working_counter) \
+    X(seq,                          H5T_NATIVE_UINT32, U32, s[i].seq)             \
+    X(flags,                        H5T_NATIVE_UINT8,  U8,  s[i].flags)
+
+/// 列总数（等于 kCols[] 的元素个数）
+size_t sampleColumnCount();
+/// 写入序列实际写出的列数——与 sampleColumnCount() 用同一份宏展开，恒等
+size_t sampleWriterCount();
+/// 按建列顺序返回列名
+std::vector<std::string> sampleColumnNames();
 
 class DataLogger {
 public:
