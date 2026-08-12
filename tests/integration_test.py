@@ -233,6 +233,93 @@ def main():
         check(c.status.get("cycles", 0) > 100, f"已运行 {c.status.get('cycles')} 个周期")
         check("jitter_max_us" in c.status, f"最大抖动 {c.status.get('jitter_max_us')} µs")
 
+        print("\n[14] 一键实验线B 全流程（mock 端到端）：record_start 实验字段 "
+              "→ HDF5 attrs → A.1 CSV 导出")
+        import glob
+        import tempfile
+
+        import h5py
+
+        c.send({"cmd": "fault_reset"})
+        c.pump(0.3)
+        c.send({"cmd": "servo_enable"})
+        c.pump(1.0)
+        check(c.status.get("servo") == "Operation Enabled",
+              f"重新使能成功，CiA402 状态 = {c.status.get('servo')}")
+        c.send({"cmd": "set_mode", "mode": "CSV"})
+        c.pump(0.3)
+        c.send({"cmd": "set_trajectory", "type": "constant", "value": 30.0})
+        c.send({"cmd": "set_target", "value": 30.0})
+        c.pump(0.3)
+
+        d = tempfile.mkdtemp(prefix="ecjc-lineB-")
+        c.send({
+            "cmd": "record_start",
+            "out_dir": d,
+            "sample_id": "A01",
+            "baseline_stage": "life_node",
+            "life_hours": 100,
+            "test_item": "TE",
+            "rep": 1,
+            "load_percent_Tr": 0,
+            "speed_rpm_target": 5,
+            "test_name": "A01_lineB",
+        })
+        c.pump(1.0)
+        a = c.last_ack("record_start")
+        check(a is not None and a["ok"], f"线B record_start 被接受: {a and a.get('msg')}")
+
+        c.send({"cmd": "start_run"})
+        c.pump(2.0)
+        a = c.last_ack("start_run")
+        check(a is not None and a["ok"], "线B start_run 被接受")
+        check(c.status.get("running"), "线B 状态显示 running")
+
+        c.send({"cmd": "stop_run"})
+        c.pump(0.3)
+        c.send({"cmd": "record_stop"})
+        c.pump(1.0)
+
+        h5s = sorted(glob.glob(os.path.join(d, "*.h5")))
+        check(len(h5s) == 1, f"h5 落盘到 out_dir: {h5s}")
+
+        def _attr(attrs, key):
+            v = attrs.get(key)
+            return v.decode() if isinstance(v, bytes) else v
+
+        if h5s:
+            with h5py.File(h5s[0]) as f:
+                attrs = f["experiment"].attrs
+                check(_attr(attrs, "sample_id") == "A01", "sample_id 写入 HDF5 attrs")
+                check(_attr(attrs, "test_item") == "TE", "test_item 写入 HDF5 attrs")
+                check(float(attrs.get("life_hours")) == 100.0, "life_hours 写入 HDF5 attrs")
+
+            sys.path.insert(0, str(ROOT / "tools"))
+            import experiment_naming as en  # noqa: E402
+            import h5_to_csv  # noqa: E402
+
+            csv_name = en.csv_filename("A01", 100, "TE", 0, 5, 1)
+            out_csv = os.path.join(d, csv_name)
+            h5_to_csv.export_a1(h5s[0], out_csv)
+            check(os.path.exists(out_csv), f"A.1 CSV 生成: {csv_name}")
+            meta_path = os.path.splitext(out_csv)[0] + ".meta.yaml"
+            check(os.path.exists(meta_path), "同名 .meta.yaml 生成")
+            if os.path.exists(meta_path):
+                import yaml
+                with open(meta_path) as fp:
+                    meta = yaml.safe_load(fp)
+                check("empty_columns" in meta, ".meta.yaml 含 empty_columns")
+
+            if os.path.exists(out_csv):
+                import csv as _csv
+                with open(out_csv) as fp:
+                    rows = list(_csv.reader(fp))
+                for col in en.EMPTY_COLUMNS:
+                    check(col in rows[0], f"留空列 {col} 在表头")
+                if "temperature_joint_C" in rows[0]:
+                    i = rows[0].index("temperature_joint_C")
+                    check(rows[1][i] == "", "留空列值为空字段（不是 NA 或 None）")
+
     finally:
         proc.terminate()
         try:
