@@ -9,6 +9,8 @@
 #include <string>
 #include <thread>
 
+#include <unistd.h>
+
 using namespace ecjc;
 
 // column_count_matches_writer_count（sampleColumnCount() == sampleWriterCount()）
@@ -23,7 +25,10 @@ using namespace ecjc;
 // 如果未来有人让某个 tag 漏展开/重复展开，start() 之后的写入会失败，
 // samples 计数对不上 kN，这条用例就会红。
 TEST(writer_persists_all_samples_through_real_datalogger) {
-    auto dir = std::filesystem::temp_directory_path() / "ecjc_logger_columns_test";
+    // 目录名带 pid：防 root/普通用户先后跑测试时互相留下写不进去的属主
+    // （/tmp sticky + fs.protected_regular，同 test_trajectory.cpp 的坑）。
+    auto dir = std::filesystem::temp_directory_path() /
+               ("ecjc_logger_columns_test_" + std::to_string(getpid()));
     std::filesystem::create_directories(dir);
 
     FullConfig cfg;
@@ -66,7 +71,9 @@ TEST(writer_persists_all_samples_through_real_datalogger) {
 // 基准的残留样本（不能盲清环：SPSC 只许 writer 消费，且盲清会误删开档后
 // 立刻到达的正常样本）。
 TEST(writer_discards_samples_older_than_record_epoch) {
-    auto dir = std::filesystem::temp_directory_path() / "ecjc_logger_epoch_test";
+    auto dir = std::filesystem::temp_directory_path() /
+               ("ecjc_logger_epoch_test_" + std::to_string(getpid()));  // pid 防跨用户属主坑，同上
+
     std::filesystem::create_directories(dir);
 
     FullConfig cfg;

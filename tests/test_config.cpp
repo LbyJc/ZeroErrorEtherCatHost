@@ -6,21 +6,34 @@
 #include "test_framework.hpp"
 #include "ecjc/config.hpp"
 
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
+
+#include <unistd.h>
 
 using namespace ecjc;
 
 namespace {
 
-// 每个用例用独立的临时子目录（含用例名），避免用例之间/并发运行时互相踩踏。
+// 每个用例用独立的临时子目录（含用例名+pid），避免用例之间/并发运行时互相踩踏。
+// pid 还兼防跨用户撞车：目录名固定的话，tyy 建过目录后 root 再跑（或反过来）
+// 会因属主不同写不进去（/tmp sticky + fs.protected_regular）。
 std::filesystem::path makeConfigDir(const std::string& case_tag,
                                      const std::string& scaling_extra) {
-    auto dir = std::filesystem::temp_directory_path() / ("ecjc_cfg_test_" + case_tag);
+    auto dir = std::filesystem::temp_directory_path() /
+               ("ecjc_cfg_test_" + std::to_string(getpid()) + "_" + case_tag);
     std::filesystem::create_directories(dir);
     auto write = [&](const char* fn, const std::string& body) {
         FILE* f = fopen((dir / fn).c_str(), "w");
+        if (!f) {
+            fprintf(stderr, "makeConfigDir: 打不开 %s: %s\n",
+                    (dir / fn).c_str(), strerror(errno));
+            exit(1);
+        }
         fwrite(body.data(), 1, body.size(), f);
         fclose(f);
     };
@@ -88,6 +101,11 @@ TEST(config_rejects_invalid_diagnostic_sdo_type) {
     // 覆盖 slave.yaml：塞一个 diagnostic_sdos 条目，type 写成不存在的 "u64"
     {
         FILE* f = fopen((dir / "slave.yaml").c_str(), "w");
+        if (!f) {
+            fprintf(stderr, "打不开 %s: %s\n",
+                    (dir / "slave.yaml").c_str(), strerror(errno));
+            exit(1);
+        }
         const std::string body =
             "slave:\n  vendor_id: 0x5a65726f\n  product_code: 0x00029252\n"
             "  min_cycle_us: 500\n"

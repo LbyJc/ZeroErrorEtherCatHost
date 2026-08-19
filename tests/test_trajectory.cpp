@@ -1,10 +1,15 @@
 #include "test_framework.hpp"
 #include "ecjc/trajectory.hpp"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
+
+#include <unistd.h>
 
 using namespace ecjc;
 
@@ -174,9 +179,16 @@ TEST(梯形轨迹_反向) {
 
 namespace {
 // 在临时目录写一个轨迹 CSV，返回路径。与 test_config.cpp 同款做法。
+// 文件名必须带 pid：/tmp 是 sticky 目录且 fs.protected_regular=2，
+// 固定文件名会让"tyy 跑过测试之后 root 跑（或反过来）"时 fopen 直接被内核拒掉。
 std::string writeTrajCsv(const std::string& tag, const std::string& body) {
-    auto p = std::filesystem::temp_directory_path() / ("ecjc_traj_test_" + tag + ".csv");
+    auto p = std::filesystem::temp_directory_path() /
+             ("ecjc_traj_test_" + std::to_string(getpid()) + "_" + tag + ".csv");
     FILE* f = fopen(p.c_str(), "w");
+    if (!f) {
+        fprintf(stderr, "writeTrajCsv: 打不开 %s: %s\n", p.c_str(), strerror(errno));
+        exit(1);
+    }
     fwrite(body.data(), 1, body.size(), f);
     fclose(f);
     return p.string();
