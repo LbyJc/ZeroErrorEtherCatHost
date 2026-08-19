@@ -61,6 +61,53 @@ TEST(csp_stop_explicit_hold_run_start_honored_within_jump_threshold) {
     CHECK_NEAR(guard.safe_target_deg, 10.0, 1e-9);   // 这次是真的保持了 Run 起始位置
 }
 
+// ── CSP 空闲保持锁存：cspIdleHoldTarget ─────────────────────────────────
+// 2026-08-13 真机：CSP + 已使能 + 未运行时，目标每拍跟随实测位置，
+// 位置环零刚度，摆臂重力以粘滑蠕动把关节持续拖走（电机侧 0~20 rpm 波动下坠）。
+// 修复：保持位置只在进入"可保持"状态的第一拍锁存一次，之后持续下发。
+
+TEST(csp_idle_hold_latches_once_and_does_not_follow_feedback) {
+    CspIdleHold h;
+    CHECK_NEAR(cspIdleHoldTarget(&h, true, 195.95), 195.95, 1e-9);  // 第一拍锁存
+    CHECK(h.latched);
+    // 关节被重力拖动了，目标必须钉住不跟随——这正是本次要修的 bug
+    CHECK_NEAR(cspIdleHoldTarget(&h, true, 195.60), 195.95, 1e-9);
+    CHECK_NEAR(cspIdleHoldTarget(&h, true, 196.30), 195.95, 1e-9);
+}
+
+TEST(csp_idle_hold_tracks_current_when_cannot_hold) {
+    CspIdleHold h;
+    // 未使能/模式未生效时不锁存，目标跟随实测（此时无力矩，跟随是安全的，
+    // 且保证使能瞬间目标 = 当前位置，不会跳向一个陈旧的锁存值）
+    CHECK_NEAR(cspIdleHoldTarget(&h, false, 50.0), 50.0, 1e-9);
+    CHECK(!h.latched);
+    CHECK_NEAR(cspIdleHoldTarget(&h, false, 51.0), 51.0, 1e-9);
+}
+
+TEST(csp_idle_hold_relatches_at_new_position_after_disable_enable) {
+    CspIdleHold h;
+    cspIdleHoldTarget(&h, true, 10.0);                       // 使能，锁存在 10°
+    cspIdleHoldTarget(&h, false, 20.0);                      // 撤使能，清锁存
+    CHECK(!h.latched);
+    CHECK_NEAR(cspIdleHoldTarget(&h, true, 30.0), 30.0, 1e-9);  // 重新使能，在新位置锁存
+}
+
+// ── slewLimit：CSP 运行期位置斜坡 ────────────────────────────────────────
+// 2026-08-13 真机：CSP 常值目标 202°、当前 109°，点开始运行第一拍就被
+// 阶跃兜底拒绝并软停，GUI 看起来"没反应"。绝对角度目标必须在软件里
+// 做成斜坡，每拍步进 = csp_position_rate_deg_per_s × dt。
+
+TEST(slew_limit_caps_step_toward_far_target) {
+    // 1 kHz、15 °/s → 每拍 0.015°
+    CHECK_NEAR(slewLimit(202.0, 109.0, 0.015), 109.015, 1e-9);
+    CHECK_NEAR(slewLimit(-50.0, 109.0, 0.015), 108.985, 1e-9);   // 反向同样限
+}
+
+TEST(slew_limit_passes_reachable_target_through) {
+    CHECK_NEAR(slewLimit(1.0, 0.9, 0.5), 1.0, 1e-9);    // 一步内可达就直达，不过冲
+    CHECK_NEAR(slewLimit(0.9, 0.9, 0.5), 0.9, 1e-9);    // 已到位保持不动
+}
+
 // ── 撤使能安全门限：isSafeToDisableAt ────────────────────────────────────
 // 依据手册 §7.1：制动器只许在 <10% 最大转速（输出最大 25 rpm）下承受动态制动。
 

@@ -19,12 +19,12 @@ FRAME_MAGIC = 0x434A4345  # 'ECJC'
 FRAME_HEADER = struct.Struct("<IHHI")  # magic, type, version, length
 FRAME_TELEMETRY = 1
 FRAME_JSON = 2
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 # 遥测样本：与 C++ Sample（backend/include/ecjc/types.hpp）逐字段一一对应。
 # 分组按 C++ 实际布局（8 字节 -> 4 字节 -> 2 字节 -> 1 字节），逐段核对过 offsetof：
 #   q   : system_time_ns
-#   14d : elapsed_time_s .. velocity_error_rpm
+#   16d : elapsed_time_s .. velocity_error_rpm, motor_torque_Nm, torque_est_Nm
 #   8i  : motor_position_raw, output_position_raw, twist_counts,
 #         following_error_counts, torque_est_mNm, aux_position_raw,
 #         position_counts_raw, motor_position_sdo
@@ -32,7 +32,7 @@ PROTOCOL_VERSION = 2
 #   4H  : controlword, statusword, error_code, temperature_drive_C
 #   2h  : torque_actual_permille, torque_ratio
 #   bBBB: operation_mode, cia402_state, ethercat_state, flags
-SAMPLE_FORMAT = "<q14d8i4I4H2hbBBB"
+SAMPLE_FORMAT = "<q16d8i4I4H2hbBBB"
 SAMPLE = struct.Struct(SAMPLE_FORMAT)
 SAMPLE_SIZE = SAMPLE.size
 
@@ -43,6 +43,7 @@ SAMPLE_FIELDS = [
     "motor_current_A", "actual_torque_Nm",
     "target_position_deg", "target_velocity_rpm", "target_torque_Nm",
     "position_error_deg", "velocity_error_rpm",
+    "motor_torque_Nm", "torque_est_Nm",
     "motor_position_raw", "output_position_raw",
     "twist_counts", "following_error_counts", "torque_est_mNm",
     "aux_position_raw", "position_counts_raw", "motor_position_sdo",
@@ -64,6 +65,7 @@ SAMPLE_DTYPE = np.dtype([
     ("target_position_deg", "<f8"), ("target_velocity_rpm", "<f8"),
     ("target_torque_Nm", "<f8"),
     ("position_error_deg", "<f8"), ("velocity_error_rpm", "<f8"),
+    ("motor_torque_Nm", "<f8"), ("torque_est_Nm", "<f8"),
     ("motor_position_raw", "<i4"), ("output_position_raw", "<i4"),
     ("twist_counts", "<i4"), ("following_error_counts", "<i4"),
     ("torque_est_mNm", "<i4"), ("aux_position_raw", "<i4"),
@@ -77,7 +79,7 @@ SAMPLE_DTYPE = np.dtype([
     ("ethercat_state", "u1"), ("flags", "u1"),
 ])
 
-assert SAMPLE_DTYPE.itemsize == SAMPLE_SIZE == 184, (
+assert SAMPLE_DTYPE.itemsize == SAMPLE_SIZE == 200, (
     f"线格式不一致: dtype={SAMPLE_DTYPE.itemsize} struct={SAMPLE_SIZE}，"
     "请同步检查 types.hpp 的 Sample 定义"
 )

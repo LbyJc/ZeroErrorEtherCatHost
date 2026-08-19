@@ -116,6 +116,7 @@ bool DataLogger::start(const RecordingMeta& meta, std::string* err) {
             std::chrono::system_clock::now().time_since_epoch()).count();
         st_.disk_free_gb = free_gb;
     }
+    fresh_start_.store(true);   // writer 先过滤掉环里早于 start_epoch_ns 的残留样本
     active_.store(true);
     return true;
 }
@@ -208,6 +209,10 @@ bool DataLogger::openFile(std::string* err) {
     attrStr("torque_est_source",
             "0x3B69 与 0x2241 同源同刻计算，驱动器手册称『估计』，全机无独立力传感元件；"
             "不得用于刚度退化判定");
+    attrStr("derived_torque_note",
+            "motor_torque_Nm = actual_torque_Nm ÷ gear_ratio（电机轴侧，电流估算无独立传感）；"
+            "torque_est_Nm = 0x3B69 ÷ 1000，mNm 单位经 0x3B6A ≈ 0x3B69/额定31Nm "
+            "真机数据交叉验证（2026-08-18）；两列均为已存原始列的纯换算");
     attrStr("temperature_scope",
             "仅驱动器温度 0x22A2，非绕组非壳体；单位未经手册核实（eTuner 界面显示为 ℃）；"
             "异步 SDO，采样时刻与 PDO 不同步");
@@ -275,6 +280,9 @@ bool DataLogger::openFile(std::string* err) {
 }
 
 void DataLogger::closeFile() {
+    // 与 writer 的「popBatch+writeBatch」互斥：等它写完手上那批再关文件，
+    // 否则逐列 extend 被半途打断，前几列比后几列多一个批次（见 io_mu_ 注释）。
+    std::lock_guard<std::mutex> lk(io_mu_);
     if (!impl_ || impl_->file < 0) return;
     if (!meta_.end_time.empty() && impl_->group >= 0) {
         hid_t s = H5Screate(H5S_SCALAR);
@@ -389,27 +397,47 @@ void DataLogger::threadMain() {
             continue;
         }
 
-        const size_t n = ring_->popBatch(impl_->batch.data(), kBatch);
-        if (n == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        } else {
-            std::string err;
-            if (!writeBatch(impl_->batch.data(), n, &err)) {
-                active_.store(false);
-                std::lock_guard<std::mutex> lk(st_mu_);
-                st_.active = false;
-                continue;
+        size_t n = 0;
+        {
+            // pop 与 write 必须在同一次 io_mu_ 持有内完成：stop() 关文件前
+            // 会拿这把锁，保证要么这批完整落盘、要么根本没 pop 出来。
+            std::lock_guard<std::mutex> lk(io_mu_);
+            n = ring_->popBatch(impl_->batch.data(), kBatch);
+            if (n > 0) {
+                // 会话开头丢弃早于本次基准的残留样本（elapsed 还是上一次的基准，
+                // 真机实测首样本 868s）。只跳前缀：见到第一个合法样本即结束过滤。
+                size_t skip = 0;
+                if (fresh_start_.load() && meta_.start_epoch_ns > 0) {
+                    while (skip < n &&
+                           impl_->batch[skip].system_time_ns < meta_.start_epoch_ns)
+                        ++skip;
+                }
+                if (skip < n) fresh_start_.store(false);
+                if (n - skip > 0) {
+                    std::string err;
+                    if (!writeBatch(impl_->batch.data() + skip, n - skip, &err)) {
+                        active_.store(false);
+                        std::lock_guard<std::mutex> lk2(st_mu_);
+                        st_.active = false;
+                        continue;
+                    }
+                    std::lock_guard<std::mutex> lk2(st_mu_);
+                    st_.samples += n - skip;
+                    st_.elapsed_s = st_.samples / (meta_.sampling_hz > 0 ? meta_.sampling_hz : 1000.0);
+                }
             }
-            std::lock_guard<std::mutex> lk(st_mu_);
-            st_.samples += n;
-            st_.elapsed_s = st_.samples / (meta_.sampling_hz > 0 ? meta_.sampling_hz : 1000.0);
         }
+        if (n == 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_flush > std::chrono::seconds(30)) {
             // 30 秒一次 flush：兼顾崩溃鲁棒性与写放大。
             // 不每批 flush —— 那会让 10 小时实验的磁盘 IO 翻好几倍。
-            if (impl_->file >= 0) H5Fflush(impl_->file, H5F_SCOPE_GLOBAL);
+            {
+                std::lock_guard<std::mutex> lk(io_mu_);   // 防 stop() 并发关文件
+                if (impl_->file >= 0) H5Fflush(impl_->file, H5F_SCOPE_GLOBAL);
+            }
             last_flush = now;
 
             std::lock_guard<std::mutex> lk(st_mu_);

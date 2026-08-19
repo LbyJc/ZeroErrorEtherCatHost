@@ -46,6 +46,7 @@ add_library(ecjc_core STATIC
   backend/src/realtime/realtime_task.cpp
   backend/src/communication/ipc_server.cpp
   backend/src/logger/data_logger.cpp
+  backend/src/logger/moving_time_store.cpp
 )
 target_include_directories(ecjc_core PUBLIC backend/include)
 if(yaml-cpp_FOUND)

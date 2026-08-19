@@ -1,0 +1,19 @@
+# 由 generate_profiles.py 生成，改参数请改脚本后重新生成
+name: 周期测试2_传动误差_空载0Tr_5rpm正转
+kind: node
+mode: CSV
+merged_from:
+  - 周期测试1_电流摩擦_空载0Tr_5rpm正转
+description: |
+  传动误差 TE 测试（§4.4），空载0Tr：5 rpm 正转，恒速 90 s（输出端 7.5 圈），全程约 100 秒。
+  本工况同时供电流摩擦（§4.3）分析使用——同一份数据两用，不必再单跑 5 rpm 摩擦点。
+  开始前确认：① 加载装置已【机械脱开】（不是归零）；② 已 Servo Enable。
+  跑完自动停止采集、数据落盘并弹出完成提示，无需手动点结束。
+  回差：把同载荷档【正转+反转】两个数据文件一起交给分析脚本。
+trajectory:
+  type: csv
+  csv_path: ../工况/周期测试2_传动误差_空载0Tr_5rpm正转.csv
+record:
+  test_item: TE
+  load_percent_Tr: 0
+  speed_rpm_target: 5

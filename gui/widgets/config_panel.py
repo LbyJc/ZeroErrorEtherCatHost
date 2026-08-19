@@ -39,6 +39,9 @@ class ConfigPanel(QWidget):
             ("额定力矩", f"{s.get('rated_torque_mNm', 0)/1000:.1f} Nm"),
             ("0x60FF 单位", "0x6064 的 counts/s（velocity_gain_correction 现为 1.0，未应用任何实测速度标定）"),
             ("电机侧 100 rpm", "0x60FF ≈ 7207（实测 99.89 rpm）"),
+            ("速度目标基准",
+             ("电机侧" if s.get("target_velocity_is_motor_side", True) else "输出侧")
+             + " rpm（target_velocity_is_motor_side）"),
         ]
         for k, v in rows:
             r = ValueRow(k)

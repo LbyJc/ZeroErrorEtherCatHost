@@ -173,7 +173,14 @@ class CsvTraj : public TrajectoryBase {
 public:
     CsvTraj(const TrajParams& p, std::vector<double> t, std::vector<Setpoint> v)
         : p_(p), t_(std::move(t)), v_(std::move(v)) {}
-    void start(const JointState&, OpMode m) override { mode_ = m; }
+    void start(const JointState& q0, OpMode m) override {
+        mode_ = m;
+        // 位置模式下 CSV 是相对波形：整体平移到当前实测位置起步，
+        // 否则文件里的绝对角度与当前位置一差就是位置阶跃（会被 5° 兜底软停）。
+        // 重复定位精度等工况依赖此语义："就地起测"。
+        base_ = (m == OpMode::CSP || m == OpMode::PP)
+                    ? q0.output_pos_unwrapped_deg - v_.front().pos_deg : 0.0;
+    }
     void eval(double t, Setpoint* s) override {
         *s = Setpoint{};
         if (t_.empty()) return;
@@ -192,12 +199,13 @@ public:
             s->vel_rpm = v_[a].vel_rpm + w * (v_[b].vel_rpm - v_[a].vel_rpm);
             s->trq_Nm  = v_[a].trq_Nm  + w * (v_[b].trq_Nm  - v_[a].trq_Nm);
         }
-        (void)mode_;
+        s->pos_deg += base_;
     }
     double duration() const override { return p_.csv_loop ? -1.0 : (t_.empty() ? 0 : t_.back()); }
     const char* name() const override { return "CSV File"; }
 private:
     TrajParams p_; OpMode mode_ = OpMode::CSP;
+    double base_ = 0;
     std::vector<double> t_;
     std::vector<Setpoint> v_;
 };

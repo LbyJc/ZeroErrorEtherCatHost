@@ -39,7 +39,11 @@ scaling:
 
   # ── 速度目标基准 / 编码器回绕 ─────────────────────────────────────────
   # 速度目标以哪一侧为准。true = GUI 输入框里填的是电机侧 rpm。
-  target_velocity_is_motor_side: true
+  # 2026-08-13 应用户要求改为 false：CSV/PV 的目标值 = 输出侧 rpm
+  # （与 CSP 的输出法兰角度基准统一）。注意改这一项时，
+  # controller.yaml 的 velocity_rate_rpm_per_s 和 trajectory.yaml 的
+  # csv_decel_rpm_per_s 都以"目标值同侧"为单位，必须一起换算（÷121）。
+  target_velocity_is_motor_side: false
 
   # 编码器回绕模数。0 = 32 位累加多圈量（本机硬件当前状态）。
   # ⚠ 本机未装 3.6V 多圈电池，0x730F 上电必报，断电重启后多圈计数丢失、

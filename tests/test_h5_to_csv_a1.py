@@ -2,6 +2,7 @@ import csv
 import math
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gui"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
@@ -116,6 +117,48 @@ def test_export_a1_kinematics_columns_are_populated_in_rad(tmp_path):
     # 30 rpm -> pi rad/s；0.25 rpm -> ~0.02618 rad/s
     assert all(abs(v - math.pi) < 1e-6 for v in omega_in)
     assert all(abs(v - (0.25 * 2 * math.pi / 60)) < 1e-6 for v in omega_out)
+
+
+def test_export_a1_scales_to_real_run_length(tmp_path):
+    """真机 bug（2026-08-13）：export_a1 曾逐元素读 HDF5（g[ds][i] 双重循环），
+    每行 ~5ms——2kHz 采样下摩擦工况 8 万行要 ~7 分钟，全堵在 GUI 主线程，
+    GNOME 弹"python 无响应"。必须整列读（向量化）。5000 行给 5s 上限：
+    向量化 <1s 稳过；逐元素 ~26s 必挂。"""
+    n = 5000
+    h5 = tmp_path / "big.h5"
+    with h5py.File(str(h5), "w") as f:
+        g = f.create_group("experiment")
+        g.create_dataset("elapsed_time_s", data=np.arange(n) / 2000.0)
+        for name in ("motor_position_unwrapped_deg", "output_position_unwrapped_deg",
+                     "motor_velocity_rpm", "output_velocity_rpm", "motor_current_A",
+                     "target_position_deg", "torque_Nm", "bus_voltage_V"):
+            g.create_dataset(name, data=np.random.rand(n))
+        _fixed_str_attr(g, "sample_id", "A01")
+    out = tmp_path / "big.csv"
+    t0 = time.perf_counter()
+    htc.export_a1(str(h5), str(out))
+    dt = time.perf_counter() - t0
+    assert dt < 5.0, f"export_a1 花了 {dt:.1f}s / {n} 行——又退化成逐元素读了?"
+    rows = list(csv.reader(open(out)))
+    assert len(rows) == n + 1
+
+
+def test_export_a1_tolerates_ragged_columns(tmp_path):
+    """真机 bug（2026-08-13）：DataLogger::stop() 与 writer 线程的批次写入有
+    竞态，closeFile 可能打断逐列 extend——前几列比后几列多出最后一个批次
+    （实测 A01 传动误差文件：elapsed 105163 行 vs 其余 105158）。导出必须
+    按所有列的最小长度截齐，不能 IndexError 崩掉。"""
+    h5 = tmp_path / "ragged.h5"
+    with h5py.File(str(h5), "w") as f:
+        g = f.create_group("experiment")
+        g.create_dataset("elapsed_time_s", data=np.arange(10, dtype=float))
+        g.create_dataset("motor_velocity_rpm", data=np.full(7, 30.0))
+        g.create_dataset("motor_current_A", data=np.zeros(7))
+        _fixed_str_attr(g, "sample_id", "A01")
+    out = tmp_path / "ragged.csv"
+    htc.export_a1(str(h5), str(out))
+    rows = list(csv.reader(open(out)))
+    assert len(rows) == 7 + 1  # 截到最短列，含表头
 
 
 def test_export_a1_string_attrs_are_decoded_not_bytes_repr(tmp_path):

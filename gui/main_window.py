@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -47,6 +50,7 @@ class MainWindow(QMainWindow):
         self._pending_cmd = None
         self._perm_warned = False
         self._last_rec_file = ""
+        self._pending_export = None   # 一键实验收尾后待办的导出任务，等录制真正关闭再做
         self._last_rec_samples = ""
 
         self.setWindowTitle(
@@ -64,7 +68,7 @@ class MainWindow(QMainWindow):
         self.system_panel = SystemPanel(cfg)
         self.cia_panel = Cia402Panel(cfg)
         self.mode_panel = ModePanel(cfg)
-        self.experiment_panel = ExperimentPanel()
+        self.experiment_panel = ExperimentPanel(cfg)
         self.live_panel = LivePanel(cfg)
         self.plot_panel = PlotPanel(cfg)
 
@@ -289,6 +293,12 @@ class MainWindow(QMainWindow):
 
     def _on_status(self, st):
         self._last_status = st
+        # 后端 last_error 变化时记入日志（只记跳变，状态是 10 Hz 推送的）
+        err = st.get("last_error") or ""
+        if err != getattr(self, "_last_error_logged", ""):
+            if err:
+                self.log_panel.append("ERROR", err)
+            self._last_error_logged = err
         self.top.update_status(st)
         self.system_panel.update_status(st, self.ipc.is_connected())
         self.cia_panel.update_status(st)
@@ -323,31 +333,100 @@ class MainWindow(QMainWindow):
         if f:
             self._last_rec_file = f
             self._last_rec_samples = rec.get("samples", "")
+        # 一键实验收尾等的就是这个 active:false——后端 DataLogger::stop() 是
+        # 同步关文件后才回发该事件，此刻读 h5 不会再撞 HDF5 写锁（真机实测：
+        # 早读会报 unable to lock file, errno=11）。
+        if self._pending_export is not None and not rec.get("active", True):
+            self._flush_pending_export()
 
     def _on_experiment_finished(self, line: str, meta: dict):
-        """一键实验面板点【结束】后触发：线 B 自动导 A.1 CSV，然后弹汇总框。"""
+        """一键实验面板点【结束】（或线B自动收尾）后触发。
+
+        不能在这里立刻读 h5：record_stop 命令刚发出去，后端还没关文件，
+        h5py 会撞上 HDF5 文件锁（errno=11 资源暂时不可用）。挂成待办，
+        等 _on_recording 收到 active:false（文件确认已关）再导出+弹框；
+        若事件迟迟不来（如采集早已手动停过，不会再有事件），10 s 兜底照做。
+        """
+        self._pending_export = {"line": line, "meta": meta}
+        QTimer.singleShot(10000, self._flush_pending_export)
+
+    def _flush_pending_export(self):
+        if self._pending_export is None:
+            return                      # 已做过（事件先到，兜底定时器晚到）
+        line = self._pending_export["line"]
+        meta = self._pending_export["meta"]
+        self._pending_export = None
+
         from widgets.experiment_dialog import SummaryDialog
 
         h5_path = self._last_rec_file
         info = {"h5_path": h5_path, "samples": self._last_rec_samples}
-        if line == "B" and h5_path:
-            try:
-                sys.path.insert(0, os.path.join(self.cfg.root, "tools"))
-                import h5_to_csv
-                import experiment_naming as en
-
-                csv_name = en.csv_filename(
-                    meta["sample_id"], meta["life_hours"], meta["test_item"],
-                    meta["load_percent_Tr"], meta["speed_rpm_target"], meta["rep"])
-                csv_path = os.path.join(meta["out_dir"], csv_name)
-                h5_to_csv.export_a1(h5_path, csv_path)
-                info["csv_path"] = csv_path
-            except Exception as e:
-                info["csv_path"] = None
-                info["error"] = f"CSV 导出失败: {e}"
-        elif line == "B" and not h5_path:
+        # 加载了实验配置时，完成弹框标题带配置名（2026-08-13 现场需求）
+        if meta.get("config_name"):
+            info["title"] = f"实验完成：{meta['config_name']}"
+        # CSV 导出改为开始弹框勾选决定（2026-08-14 需求：CSV 大不好存），
+        # 不再按线别硬编码——线B 默认勾（维持原行为），线A 默认不勾。
+        want_csv = bool(meta.get("export_csv"))
+        if want_csv and h5_path:
+            # 导出必须放工作线程：TE 工况 20 万行即使整列读也要 ~10s，放主线程
+            # 会把 Qt 事件循环堵到 GNOME 弹"python 无响应"强杀框（2026-08-13
+            # 真机 bug）。工作线程只碰文件不碰 Qt；完成后由主线程定时器收尾弹框。
+            self.statusBar().showMessage("正在导出 CSV，完成后弹出实验汇总…")
+            t = threading.Thread(target=self._export_csv_worker,
+                                 args=(h5_path, meta, info), daemon=True)
+            t.start()
+            self._watch_export(t, info)
+            return
+        if want_csv and not h5_path:
             info["csv_path"] = None
             info["error"] = "未找到本次录制的 HDF5 路径，跳过 CSV 导出。"
+        SummaryDialog(info, self).exec()
+
+    def _export_csv_worker(self, h5_path: str, meta: dict, info: dict):
+        """工作线程：h5 → A.1 CSV。结果写进 info（主线程等线程死透才读，无竞争）。
+        这里绝对不能碰任何 Qt 对象。"""
+        try:
+            sys.path.insert(0, os.path.join(self.cfg.root, "tools"))
+            import h5_to_csv
+            import experiment_naming as en
+
+            # 时间戳与 h5 文件名同源（后端 fileStamp 的 _YYYYMMDD_HHMMSS 后缀），
+            # 保证同一次运行的 csv/h5 一眼能对上；解析不出就用当前时间兜底。
+            h5_base = os.path.basename(h5_path)
+            m = re.search(r"_(\d{8}_\d{6})\.h5$", h5_base)
+            stamp = m.group(1) if m else time.strftime("%Y%m%d_%H%M%S")
+            if meta.get("test_item"):
+                # 线B：§4.2 节点命名模板 + 时间戳段
+                csv_name = en.csv_filename(
+                    meta["sample_id"], meta["life_hours"], meta["test_item"],
+                    meta["load_percent_Tr"], meta["speed_rpm_target"], meta["rep"],
+                    stamp=stamp)
+            else:
+                # 线A（持续运行）：没有 test_item/载荷/重复号，不套节点模板，
+                # 直接与 h5 同名（名字里已有配置名/寿命区间/时间戳）
+                csv_name = h5_base[:-3] + ".csv" if h5_base.endswith(".h5") \
+                    else h5_base + ".csv"
+            csv_path = os.path.join(meta["out_dir"], csv_name)
+            # 双保险：万一还有锁（NFS、别的读者），重试 3 次
+            for attempt in range(3):
+                try:
+                    h5_to_csv.export_a1(h5_path, csv_path)
+                    break
+                except (BlockingIOError, OSError) as e:
+                    if attempt == 2 or getattr(e, "errno", None) not in (11, None):
+                        raise
+                    time.sleep(0.5)
+            info["csv_path"] = csv_path
+        except Exception as e:
+            info["csv_path"] = None
+            info["error"] = f"CSV 导出失败: {e}"
+
+    def _watch_export(self, t: threading.Thread, info: dict):
+        if t.is_alive():
+            QTimer.singleShot(200, lambda: self._watch_export(t, info))
+            return
+        from widgets.experiment_dialog import SummaryDialog
+        self.statusBar().clearMessage()
         SummaryDialog(info, self).exec()
 
     def _on_ack(self, cmd, ok, msg):

@@ -326,7 +326,9 @@ bool loadConfig(const std::string& dir, FullConfig* o, std::string* err) {
             o->controller.torque_Nm_limit     = get<double>(l, "torque_Nm", 20.0);
             o->controller.torque_rate_Nm_per_s = get<double>(l, "torque_rate_Nm_per_s", 100.0);
             o->controller.velocity_rate_rpm_per_s =
-                get<double>(l, "velocity_rate_rpm_per_s", 200.0);
+                get<double>(l, "velocity_rate_rpm_per_s", 1.65);
+            o->controller.csp_position_rate_deg_per_s =
+                get<double>(l, "csp_position_rate_deg_per_s", 15.0);
         }
     }
 

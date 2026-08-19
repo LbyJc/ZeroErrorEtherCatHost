@@ -71,27 +71,36 @@ def export_a1(h5path, out_csv):
         cols = en.A1_COLUMNS + sorted(ext)
         attrs = {k: g.attrs[k] for k in g.attrs}
 
+        # 每列整列读一次(g[ds][:])再逐行写。不许改回 g[ds][i] 逐元素读——
+        # 每次是一趟完整 h5py 调用(~5ms/行)，真机 2kHz 采集 8 万行要 ~7 分钟，
+        # GUI 主线程会被堵到 GNOME 弹"python 无响应"(2026-08-13 真机 bug)。
+        col_data = []   # 与 cols 对齐：numpy 数组(逐行取) 或 标量(逐行重复)
+        for c in cols:
+            src = A1_SOURCE.get(c)
+            ds_name = None
+            if src is not None:
+                names, conv = src
+                ds_name = next((nm for nm in names if nm in present), None)
+            if ds_name is not None:
+                arr = g[ds_name][:]
+                col_data.append(conv(arr) if conv else arr)
+            elif c in present:
+                col_data.append(g[c][:])
+            elif c in attrs:
+                col_data.append(_dec(attrs[c]))  # per-file 常量逐行重复
+            else:
+                col_data.append("")  # 留空列 / 未采集量
+
+        # 后端 stop() 曾与 writer 批次写入竞态，closeFile 打断逐列 extend 时
+        # 前几列会比后几列多出最后一批——按最小列长截齐，别 IndexError 崩掉。
+        n = min([n] + [len(v) for v in col_data if isinstance(v, np.ndarray)])
+
         with open(out_csv, "w", newline="") as fp:
             w = csv.writer(fp)
             w.writerow(cols)
             for i in range(n):
-                row = []
-                for c in cols:
-                    src = A1_SOURCE.get(c)
-                    ds_name = None
-                    if src is not None:
-                        names, conv = src
-                        ds_name = next((nm for nm in names if nm in present), None)
-                    if ds_name is not None:
-                        val = g[ds_name][i]
-                        row.append(conv(val) if conv else val)
-                    elif c in present:
-                        row.append(g[c][i])
-                    elif c in attrs:
-                        row.append(_dec(attrs[c]))  # per-file 常量逐行重复
-                    else:
-                        row.append("")  # 留空列 / 未采集量
-                w.writerow(row)
+                w.writerow([v[i] if isinstance(v, np.ndarray) else v
+                            for v in col_data])
 
     calib = {k: (float(v) if isinstance(v, (int, float, np.floating)) else _dec(v))
              for k, v in attrs.items()}

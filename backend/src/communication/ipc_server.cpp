@@ -678,7 +678,13 @@ std::string IpcServer::statusJson() {
       << ",\"mode_display\":" << static_cast<int>(s.mode_display)
       << ",\"mode_matched\":" << (s.mode_matched ? "true" : "false")
       << ",\"running\":"     << (s.running ? "true" : "false")
+      // 软停斜坡进行中标志：诊断"软停超时"时用（GUI 不显示也留着）
+      << ",\"stopping\":"    << (s.stopping ? "true" : "false")
       << ",\"run_time_s\":"  << num(s.run_time_s)
+      // 关节转动时长（只在 |输出侧转速|>0.5rpm 时累加）：moving 按本次运行
+      // 分段，total 跨重启续算（落盘见 main.cpp）。
+      << ",\"moving_time_s\":"       << num(s.moving_time_s)
+      << ",\"total_moving_time_s\":" << num(s.total_moving_time_s)
       << ",\"cycle_us\":"    << cfg_.ethercat.cycle_us
       << ",\"jitter_us\":"      << num(s.stats.jitter_ns / 1000.0)
       << ",\"jitter_max_us\":"  << num(s.stats.jitter_max_ns / 1000.0)
@@ -794,6 +800,14 @@ void IpcServer::handleLine(const std::string& line) {
         // 的 isSafeToDisableAt 门控，Task 3 已加）。这里不需要另开一个函数。
         rt_->servoDisable();
         log("INFO", "已请求安全停机：软停至 2.5 rpm 以下后撤使能");
+    } else if (cmd == "reset_total_moving_time") {
+        // GUI 侧已做二次确认。清零 + 立即落盘，450h 计数被误清无法恢复，
+        // 所以日志里必须留一笔当时的值。
+        const double old_s = rt_->totalMovingNs() / 1e9;
+        rt_->resetTotalMovingTime();
+        if (persist_moving_time_) persist_moving_time_();
+        log("WARNING", "累计转动时长已清零（清零前 " +
+                           std::to_string(old_s / 3600.0) + " h）");
     } else if (cmd == "fault_reset") {
         rt_->faultReset();
     } else if (cmd == "quick_stop") {
@@ -885,10 +899,19 @@ void IpcServer::handleLine(const std::string& line) {
         m.operator_name         = j.str("operator", "");
         m.exp_notes             = j.str("notes", "");
         m.out_dir               = j.str("out_dir", "");
+        // 基准时刻必须在开档【之前】生效：RT 每拍都在产样，环里躺着旧基准的
+        // 残留样本（真机实测新文件首样本 elapsed=868s=距上次采集的时间）。
+        // 先设 epoch，logger 再按 start_epoch_ns 丢弃早于它的前缀样本。
+        // 两个基准是【不同的钟】，别合并：RT 的 elapsed 基准用单调钟（断网跑
+        // 450h，中途 NTP 跳变/改时间不能弄断文件内时间轴）；logger 的残留过滤
+        // 基准用墙钟（样本里可比的绝对时戳只有 system_time_ns，它是墙钟）。
+        struct timespec mono_ts;
+        clock_gettime(CLOCK_MONOTONIC, &mono_ts);
+        rt_->setRecordEpoch(int64_t(mono_ts.tv_sec) * 1000000000LL + mono_ts.tv_nsec);
+        m.start_epoch_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
         ok = logger_->start(m, &err);
         if (ok) {
-            rt_->setRecordEpoch(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
             rt_->setRecording(true);
             log("INFO", "开始数据采集");
         }

@@ -35,6 +35,7 @@ from ipc_client import (  # noqa: E402
 SOCK = "/run/ethercat-joint-control/control.sock"
 ASSUMED_CPR = 524288          # 待验证的输出侧分辨率
 TARGET_COUNTS = ASSUMED_CPR // 2   # 半圈
+GEAR_RATIO = 121.0            # config/scaling.yaml gear_ratio
 
 
 class C:
@@ -79,6 +80,10 @@ def main():
     ap.add_argument("--motor-rpm", type=float, default=200.0,
                     help="电机侧转速，默认 200 rpm（输出侧约 1.65 rpm，半圈约 18 秒）")
     args = ap.parse_args()
+    # 2026-08-13 起 set_target 的语义是**输出侧 rpm**
+    # （scaling.yaml target_velocity_is_motor_side=false），
+    # 脚本参数保持电机侧习惯，在这里换算一次。
+    target_out_rpm = args.motor_rpm / GEAR_RATIO
 
     c = C(args.socket)
     c.send(cmd="get_status"); c.pump(0.5)
@@ -94,8 +99,8 @@ def main():
         print(f"使能失败，当前 {c.status.get('servo')}")
         return 1
 
-    c.send(cmd="set_trajectory", type="constant", value=args.motor_rpm)
-    c.send(cmd="set_target", value=args.motor_rpm)
+    c.send(cmd="set_trajectory", type="constant", value=target_out_rpm)
+    c.send(cmd="set_target", value=target_out_rpm)
     c.pump(0.5)
     while c.last is None:
         c.pump(0.3)
@@ -107,7 +112,9 @@ def main():
     c.send(cmd="start_run")
     t0 = time.time()
     stopped = False
-    decel = 200.0    # controller.yaml 里的 velocity_rate_rpm_per_s
+    # controller.yaml 里的 velocity_rate_rpm_per_s（现为输出侧 1.65 rpm/s），
+    # 惯走预测用电机侧转速，换算回电机侧
+    decel = 1.65 * GEAR_RATIO
 
     while time.time() - t0 < 180:
         c.pump(0.2)

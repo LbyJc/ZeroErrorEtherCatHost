@@ -158,9 +158,11 @@ def main():
         check(c.status.get("controlword") == 0x000F,
               f"控制字 = 0x{c.status.get('controlword', 0):04X}")
 
-        print("\n[7] 设目标 100 rpm 并运行")
-        c.send({"cmd": "set_trajectory", "type": "constant", "value": 100.0})
-        c.send({"cmd": "set_target", "value": 100.0})
+        print("\n[7] 设目标 1 rpm（输出侧）并运行")
+        # 目标值现在是输出侧 rpm（scaling.yaml target_velocity_is_motor_side=false），
+        # 1 输出 rpm = 121 电机 rpm
+        c.send({"cmd": "set_trajectory", "type": "constant", "value": 1.0})
+        c.send({"cmd": "set_target", "value": 1.0})
         c.pump(0.3)
         c.samples.clear()
         c.send({"cmd": "start_run"})
@@ -173,7 +175,8 @@ def main():
         check(len(s) > 50, f"收到 {len(s)} 个遥测样本")
         if len(s):
             vel = s["motor_velocity_rpm"][-20:].mean()
-            check(abs(vel - 100.0) < 5.0, f"电机侧转速稳定在 {vel:.2f} rpm（目标 100）")
+            check(abs(vel - 121.0) < 6.0,
+                  f"电机侧转速稳定在 {vel:.2f} rpm（目标输出侧 1 rpm = 电机侧 121 rpm）")
 
             out_vel = s["output_velocity_rpm"][-20:].mean()
             ratio = vel / out_vel if out_vel else 0
@@ -261,8 +264,9 @@ def main():
               f"重新使能成功，CiA402 状态 = {c.status.get('servo')}")
         c.send({"cmd": "set_mode", "mode": "CSV"})
         c.pump(0.3)
-        c.send({"cmd": "set_trajectory", "type": "constant", "value": 30.0})
-        c.send({"cmd": "set_target", "value": 30.0})
+        # 输出侧 5 rpm，与下面 record_start 声明的 speed_rpm_target=5 一致
+        c.send({"cmd": "set_trajectory", "type": "constant", "value": 5.0})
+        c.send({"cmd": "set_target", "value": 5.0})
         c.pump(0.3)
 
         d = tempfile.mkdtemp(prefix="ecjc-lineB-")
@@ -307,6 +311,23 @@ def main():
                 check(_attr(attrs, "test_item") == "TE", "test_item 写入 HDF5 attrs")
                 check(float(attrs.get("life_hours")) == 100.0, "life_hours 写入 HDF5 attrs")
 
+                # v3 派生力矩列：不但要在场，数值语义也要钉死——
+                # torque_est_Nm = torque_est_mNm/1000，motor_torque_Nm = actual/121
+                ds = {}
+                f.visititems(lambda n, o: ds.__setitem__(n.rsplit("/", 1)[-1], o)
+                             if isinstance(o, h5py.Dataset) else None)
+                check("motor_torque_Nm" in ds and "torque_est_Nm" in ds,
+                      "v3 派生力矩两列在 h5 中")
+                if "torque_est_Nm" in ds:
+                    est_Nm = ds["torque_est_Nm"][:]
+                    est_mNm = ds["torque_est_mNm"][:]
+                    check(abs(est_Nm - est_mNm / 1000.0).max() < 1e-9,
+                          "torque_est_Nm == torque_est_mNm/1000（mock=8.2）")
+                    act = ds["actual_torque_Nm"][:]
+                    mtr = ds["motor_torque_Nm"][:]
+                    check(abs(mtr - act / 121.0).max() < 1e-9,
+                          "motor_torque_Nm == actual_torque_Nm/减速比121")
+
             sys.path.insert(0, str(ROOT / "tools"))
             import experiment_naming as en  # noqa: E402
             import h5_to_csv  # noqa: E402
@@ -329,6 +350,8 @@ def main():
                     rows = list(_csv.reader(fp))
                 for col in en.EMPTY_COLUMNS:
                     check(col in rows[0], f"留空列 {col} 在表头")
+                for col in ("motor_torque_Nm", "torque_est_Nm"):
+                    check(col in rows[0], f"v3 派生力矩列 {col} 进 CSV 扩展列")
                 if "temperature_joint_C" in rows[0]:
                     i = rows[0].index("temperature_joint_C")
                     check(rows[1][i] == "", "留空列值为空字段（不是 NA 或 None）")
@@ -372,6 +395,36 @@ def main():
                       f".meta.yaml 里 sample_id 已 decode: {meta2.get('sample_id')!r}")
                 check("b'" not in str(meta2.get("sample_id")),
                       ".meta.yaml 的 sample_id 不含 bytes repr")
+
+        print("\n[15] 关节转动时长：转动累加、停止暂停、开始清零本次、清零累计")
+        # [14] 刚以输出侧 5 rpm 跑过并 stop_run。软停斜坡 1.65 rpm/s 从 5 rpm
+        # 压到阈值 0.5 以下要 ~2.7s，先等它真正停稳再做"暂停"判定。
+        c.pump(3.5)
+        check("moving_time_s" in c.status and "total_moving_time_s" in c.status,
+              "status 含 moving_time_s / total_moving_time_s 字段")
+        mv_frozen = c.status.get("moving_time_s", 0.0)
+        tot1 = c.status.get("total_moving_time_s", 0.0)
+        check(mv_frozen > 0.5, f"运行过后本次转动时长 > 0（{mv_frozen:.2f}s）")
+        check(tot1 >= mv_frozen, f"累计 ≥ 本次（{tot1:.2f} ≥ {mv_frozen:.2f}）")
+        c.pump(1.0)
+        tot2 = c.status.get("total_moving_time_s", 0.0)
+        check(abs(tot2 - tot1) < 1e-9, f"停止后累计暂停不再增长（{tot1:.3f}→{tot2:.3f}）")
+        check(abs(c.status.get("moving_time_s", 0.0) - mv_frozen) < 1e-9,
+              "停止后本次读数停住可读，不清零")
+
+        c.send({"cmd": "start_run"})     # 伺服仍使能，直接再跑
+        c.pump(0.6)
+        a = c.last_ack("start_run")
+        check(a is not None and a["ok"], "再次 start_run 被接受")
+        mv_new = c.status.get("moving_time_s", 99.0)
+        check(mv_new < mv_frozen, f"新一次运行清零重计（{mv_new:.2f} < {mv_frozen:.2f}）")
+        c.send({"cmd": "stop_run"})
+        c.pump(4.0)                       # 等软停走完、转速降到阈值以下
+
+        c.send({"cmd": "reset_total_moving_time"})
+        c.pump(0.5)
+        tot3 = c.status.get("total_moving_time_s", 99.0)
+        check(tot3 < 0.2, f"清零累计生效（{tot3:.3f}s）")
 
     finally:
         proc.terminate()

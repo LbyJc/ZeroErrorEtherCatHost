@@ -49,13 +49,15 @@ class LivePanel(QWidget):
         tg = QVBoxLayout(t)
         tg.setSpacing(1)
         self.trq = ValueRow("实际力矩", "Nm")
+        self.trq_motor = ValueRow("电机轴力矩", "Nm")
+        self.trq_est = ValueRow("估计力矩(厂商)", "Nm")
         self.trq_tgt = ValueRow("目标力矩", "Nm")
         self.pos_tgt = ValueRow("目标位置", "deg")
         self.vel_tgt = ValueRow("目标转速", "rpm")
         self.pos_err = ValueRow("位置误差", "deg")
         self.vel_err = ValueRow("速度误差", "rpm")
-        for r in (self.trq, self.trq_tgt, self.pos_tgt, self.vel_tgt,
-                  self.pos_err, self.vel_err):
+        for r in (self.trq, self.trq_motor, self.trq_est, self.trq_tgt,
+                  self.pos_tgt, self.vel_tgt, self.pos_err, self.vel_err):
             tg.addWidget(r)
         root.addWidget(t)
 
@@ -87,6 +89,8 @@ class LivePanel(QWidget):
         self.o_raw.set_text(f"{int(s['output_position_raw']):,}")
 
         self.trq.set_value(float(s["actual_torque_Nm"]))
+        self.trq_motor.set_value(float(s["motor_torque_Nm"]), "{:.4f}")
+        self.trq_est.set_value(float(s["torque_est_Nm"]))
         self.trq_tgt.set_value(float(s["target_torque_Nm"]))
         self.pos_tgt.set_value(float(s["target_position_deg"]), "{:.2f}")
         self.vel_tgt.set_value(float(s["target_velocity_rpm"]), "{:.2f}")

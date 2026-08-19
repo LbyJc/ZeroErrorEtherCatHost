@@ -84,6 +84,17 @@ class SystemPanel(QWidget):
         self.reset_steps()
         root.addWidget(prog)
 
+        # ── 维护 ────────────────────────────────────────────────────
+        maint = QGroupBox("维护")
+        mg = QVBoxLayout(maint)
+        self.btn_reset_moving = QPushButton("清零累计转动时长")
+        self.btn_reset_moving.setToolTip(
+            "把顶栏【累计转动】清零并立即落盘。用于更换关节样机后重新计数。\n"
+            "450h 寿命计数被误清无法恢复，点击后会二次确认。")
+        self.btn_reset_moving.clicked.connect(self._on_reset_moving_time)
+        mg.addWidget(self.btn_reset_moving)
+        root.addWidget(maint)
+
         # ── 快捷入口 ────────────────────────────────────────────────
         open_box = QGroupBox("打开")
         og = QGridLayout(open_box)
@@ -108,6 +119,18 @@ class SystemPanel(QWidget):
                 "停主站会等待软停完成（最长 20 s），运行中直接停会拉长该等待。")
             return
         self._cmd("disconnect_bus")
+
+    def _on_reset_moving_time(self):
+        # 450h 寿命计数，误清无法恢复——必须二次确认，且默认按钮是"取消"
+        ret = QMessageBox.question(
+            self, "清零累计转动时长",
+            "确定要把累计转动时长清零吗？\n\n"
+            "该计数是 450h 寿命实验的依据，清零后无法恢复\n"
+            "（后端日志会留一笔清零前的数值）。\n"
+            "仅在更换关节样机后使用。",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+        if ret == QMessageBox.Yes:
+            self._cmd("reset_total_moving_time")
 
     def _cmd(self, name, **kw):
         self.command.emit({"cmd": name, **kw})

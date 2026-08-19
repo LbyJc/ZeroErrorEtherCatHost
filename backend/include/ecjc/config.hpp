@@ -111,7 +111,9 @@ struct GuiCfg {
 struct StopRampCfg {
     double csv_decel_rpm_per_s = 200.0;
     double cst_decel_Nm_per_s = 5.0;
-    bool   csp_hold_position = false;   // CSP 停止 = 保持"当前实测位置"。
+    bool   csp_hold_position = false;   // CSP 停止 = 保持"停止时刻锁存的位置"
+                                        // （经 cspIdleHoldTarget 锁存一次，不是每拍
+                                        // 跟随实测——那是零刚度，重力会拖着关节蠕动）。
                                         // 置 true 会保持"本次 Run 开始时"的位置——但这个承诺
                                         // 只在该位置与当前实测偏差 ≤ scaling.limits.
                                         // csp_target_jump_deg_max（默认 5°）时才被履行：
@@ -128,12 +130,49 @@ inline double cspStopTarget(const StopRampCfg& cfg, double hold_deg, double curr
     return cfg.csp_hold_position ? hold_deg : current_deg;
 }
 
+/// CSP 空闲保持的锁存状态（2026-08-13 真机 finding）。
+///
+/// 未运行时若把目标每拍设为"当前实测位置"，参考永远跟着反馈走，位置环
+/// 零刚度——摆臂重力会以粘滑蠕动把关节持续拖走（实测：使能后不点 Run，
+/// 电机侧 0~20 rpm 波动持续下坠，实际力矩恒为重力矩 ≈ -1.4 Nm）。
+/// 所以"可保持"状态（已使能 + 模式已生效为 CSP + 未运行）的第一拍要把
+/// 保持位置**锁存一次**并持续下发；失去条件立即清锁存、退回跟随实测
+/// （无力矩时跟随是安全的，且保证使能瞬间目标 = 当前位置，无阶跃）。
+struct CspIdleHold {
+    bool   latched = false;
+    double hold_deg = 0.0;
+};
+
+/// 每拍推进锁存状态并返回本拍应下发的保持位置。
+/// can_hold = 伺服 OperationEnabled 且 0x6061 已生效为 CSP 且未运行。
+inline double cspIdleHoldTarget(CspIdleHold* h, bool can_hold, double current_deg) {
+    if (!can_hold) {
+        h->latched = false;
+        return current_deg;
+    }
+    if (!h->latched) {
+        h->latched = true;
+        h->hold_deg = current_deg;
+    }
+    return h->hold_deg;
+}
+
 /// 撤使能安全门限。手册 §7.1：制动器只许在 <10% 最大转速下承受动态制动，
 /// eRob80H120 输出端最大 25 rpm ⇒ 门限 2.5 rpm。
 constexpr double kSafeDisableOutputRpm = 2.5;
 
 inline bool isSafeToDisableAt(double output_rpm, bool stopping) {
     return !stopping && std::fabs(output_rpm) < kSafeDisableOutputRpm;
+}
+
+/// 关节「在转」判定阈值（输出侧 rpm），本次/累计转动时长只在超过它时累加。
+/// 0.5 由用户拍板（2026-08-18）：高于停机后的静止残余读数（实测 0.2~0.25 rpm，
+/// 低于它会把静止误计为在转），低于最慢实验工况（CSV 2 rpm 低速采数）。
+/// 按实测转速判定而不是下发目标：堵转（有目标没转动）不计时。
+constexpr double kMovingRpmThreshold = 0.5;
+
+inline bool isJointMoving(double output_rpm) {
+    return std::fabs(output_rpm) > kMovingRpmThreshold;
 }
 
 /// 撤使能门控的超时兜底判定：等待软停走完超过 disable_timeout_cycles 拍后，
@@ -165,11 +204,24 @@ struct ControllerCfg {
     std::string default_id = "passthrough";
     double torque_Nm_limit = 20.0;
     double torque_rate_Nm_per_s = 100.0;
-    /// 目标速度的变化率上限（电机侧 rpm/s）。
-    /// 不限的话，Constant 轨迹一开跑就是 0→100 rpm 的阶跃，
-    /// 驱动器实际速度跟不上，会报 0x3B68 = 0xFF00 软速度误差警告。
-    double velocity_rate_rpm_per_s = 200.0;
+    /// 目标速度的变化率上限（单位与速度目标值同侧，见
+    /// scaling.target_velocity_is_motor_side；现配置为输出侧）。
+    /// 不限的话，Constant 轨迹一开跑就是阶跃，驱动器实际速度跟不上，
+    /// 会报 0x3B68 = 0xFF00 软速度误差警告。
+    double velocity_rate_rpm_per_s = 1.65;
+    /// CSP 运行期位置目标的斜坡速度（输出侧 °/s）。CSP 下驱动器不做
+    /// profile 规划，绝对角度目标一步下发就是位置阶跃、会被阶跃兜底
+    /// 拒绝——所以在软件里做成匀速斜坡。15 °/s = 输出侧 2.5 rpm。
+    double csp_position_rate_deg_per_s = 15.0;
 };
+
+/// 单步斜坡限幅：把 target 相对 last 的变化限制在 ±max_step 之内。
+inline double slewLimit(double target, double last, double max_step) {
+    const double d = target - last;
+    if (d >  max_step) return last + max_step;
+    if (d < -max_step) return last - max_step;
+    return target;
+}
 
 struct FullConfig {
     AppCfg        app;

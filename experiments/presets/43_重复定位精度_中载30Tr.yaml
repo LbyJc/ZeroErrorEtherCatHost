@@ -1,0 +1,17 @@
+# 由 generate_profiles.py 生成，改参数请改脚本后重新生成
+name: 重复定位精度_中载30Tr
+kind: node
+mode: CSP
+description: |
+  重复定位精度 RP 测试，中载30Tr：就地起测——开始前先把关节停到本节点固定参考位（建议摆臂竖直下垂），每次测试都用同一参考位。
+  回程 ±10°，逼近 15°/s，到位停 4 s；正反两方向各 2 次预跑（不计入）+ 30 次循环，同一文件采完，全程约 6.8 分钟。
+  开始前确认：① 外部加载装置设 9.3 Nm（30%Tr）并记录实际值；② 已 Servo Enable；③ 关节已在参考位。
+  跑完自动停止采集、数据落盘并弹出完成提示，无需手动点结束。
+  分析：单个 h5 交给 analyze_node_tests.py，输出 R↑/R↓/双向差 B（角秒）。
+trajectory:
+  type: csv
+  csv_path: ../工况/重复定位精度_中载30Tr.csv
+record:
+  test_item: RP
+  load_percent_Tr: 30
+  speed_rpm_target: 2.5

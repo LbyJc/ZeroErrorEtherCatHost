@@ -12,7 +12,7 @@ namespace ecjc {
 
 // ── 帧 ────────────────────────────────────────────────────────────────────
 constexpr uint32_t kFrameMagic = 0x434A4345u;   // 'ECJC' (小端)
-constexpr uint16_t kProtocolVersion = 2;
+constexpr uint16_t kProtocolVersion = 3;
 
 enum class FrameType : uint16_t {
     Telemetry = 1,     // payload = N × Sample，二进制
@@ -77,7 +77,7 @@ const char* toString(AppState s);
 
 // ── 遥测样本 ──────────────────────────────────────────────────────────────
 // 字段顺序按自然对齐排布（8 字节的在前），保证无内部填充、跨语言布局稳定。
-// Python 对应格式串: "<q14d8i4I4H2hbBBB" —— 以 gui/ipc_client.py 的 SAMPLE_FORMAT 为准，
+// Python 对应格式串: "<q16d8i4I4H2hbBBB" —— 以 gui/ipc_client.py 的 SAMPLE_FORMAT 为准，
 // 两边尺寸不一致时 GUI 连接握手会直接报错。
 struct Sample {
     int64_t  system_time_ns;                  // Unix epoch 纳秒
@@ -96,6 +96,9 @@ struct Sample {
     double   target_torque_Nm;
     double   position_error_deg;
     double   velocity_error_rpm;
+    double   motor_torque_Nm;                 // 电机轴侧 = actual_torque_Nm ÷ 减速比
+    double   torque_est_Nm;                   // 0x3B69 mNm→Nm，厂商传递力矩估计
+                                              //   （单位经 0x3B6A≈0x3B69/额定31Nm 真机交叉验证）
 
     int32_t  motor_position_raw;              // 原始计数，必须保留
     int32_t  output_position_raw;
@@ -123,9 +126,9 @@ struct Sample {
     uint8_t  ethercat_state;                  // EcState
     uint8_t  flags;                           // bit0 running, bit1 recording, bit2 fault
 };
-static_assert(sizeof(Sample) == 184,
+static_assert(sizeof(Sample) == 200,
               "Sample 布局变了！同步更新 gui/ipc_client.py 的 SAMPLE_FORMAT 与 kProtocolVersion");
-static_assert(offsetof(Sample, motor_position_raw) == 120, "Sample 布局意外填充");
+static_assert(offsetof(Sample, motor_position_raw) == 136, "Sample 布局意外填充");
 
 constexpr uint8_t kFlagRunning   = 0x01;
 constexpr uint8_t kFlagRecording = 0x02;

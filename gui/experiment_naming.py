@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-VALID_TEST_ITEMS = {"current", "TE", "backlash", "stiffness", "p2p", "sine"}
+VALID_TEST_ITEMS = {"current", "TE", "backlash", "stiffness", "p2p", "sine", "RP"}
 
 # 总线测不了、CSV 里写空字段（不写 NA）的三列。语义见 meta_yaml_dict。
 EMPTY_COLUMNS = ["load_torque_Nm_actual", "temperature_motor_C", "temperature_joint_C"]
@@ -35,18 +35,21 @@ def _norm_num(x):
 
 
 def csv_filename(sample_id, life_hours, test_item, load_pct, speed_rpm, rep,
-                 direction="na", amp_deg="na", freq_hz="na") -> str:
-    """按 §4.2 扩展模板拼 CSV 文件名。test_item 必须属受控词表。"""
+                 direction="na", amp_deg="na", freq_hz="na", stamp=None) -> str:
+    """按 §4.2 扩展模板拼 CSV 文件名。test_item 必须属受控词表。
+    stamp（如 20260814_103000，与 h5 的 fileStamp 同源）非空时附加
+    __t_<stamp> 段——区分同工况多次运行，也防重名互相覆盖（2026-08-14 需求）。"""
     if test_item not in VALID_TEST_ITEMS:
         raise ValueError(
             f"test_item '{test_item}' 不在受控词表 {sorted(VALID_TEST_ITEMS)}")
     life_hours = _norm_num(life_hours)
     load_pct = _norm_num(load_pct)
     speed_rpm = _norm_num(speed_rpm)
+    tail = f"__t_{stamp}" if stamp else ""
     return (f"sample_{sample_id}__life_{life_hours}h__test_{test_item}"
             f"__load_{load_pct}Tr__speed_{speed_rpm}rpm"
             f"__dir_{direction}__amp_{amp_deg}__freq_{freq_hz}"
-            f"__rep_{int(rep):02d}.csv")
+            f"__rep_{int(rep):02d}{tail}.csv")
 
 
 def meta_yaml_dict(calib: dict) -> dict:

@@ -104,7 +104,10 @@ def main():
     ap.add_argument("--socket", default=DEFAULT_SOCK)
     ap.add_argument("action", nargs="+",
                     help="connect | status | enable | disable | fault_reset | "
-                         "mode:CSV | target:100 | run | stop | wait:3 | sample")
+                         "mode:CSV | target:2 | run | stop | wait:3 | sample"
+                         "（target 单位与 GUI 目标值一致：CSV=输出侧 rpm、"
+                         "CSP=输出法兰绝对角度 deg、CST=Nm，"
+                         "见 scaling.yaml target_velocity_is_motor_side）")
     args = ap.parse_args()
 
     c = Client(args.socket)

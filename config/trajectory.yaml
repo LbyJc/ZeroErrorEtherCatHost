@@ -40,7 +40,9 @@ trajectory:
 
   # 停止运行时的软停参数（任务书第二十一节）
   stop_ramp:
-    csv_decel_rpm_per_s: 200.0
+    # 单位与速度目标值同侧（现在 = 输出侧 rpm/s，1.65 ≈ 电机侧 200）。
+    # 从输出侧上限 25 rpm 减到零约 15.2 s，与 main.cpp 的停机预算推导一致。
+    csv_decel_rpm_per_s: 1.65
     cst_decel_Nm_per_s: 5.0
     csp_hold_position: false    # CSP 停止 = 保持当前实测位置。
                                 # 置 true 表示保持"本次 Run 开始时"的位置——那是位置阶跃，
@@ -49,4 +51,8 @@ trajectory:
                                 # scaling.limits.csp_target_jump_deg_max（默认 5°）时才
                                 # 被履行：超过阈值会被位置阶跃兜底钳回当前实测位置并强制
                                 # 软停，不再是"Run 起始位置"（失效到安全侧）。
-    disable_timeout_cycles: 15000   # 软停等待上限。1 kHz 下 15 s，够从 3000 电机 rpm 按 200 rpm/s 减到零
+    # 软停等待上限。1 kHz 下 20 s。2026-08-18 从 15000 提到 20000：持续运行改
+    # 25 rpm 后，斜坡本身就要 25/1.65 ≈ 15.2 s，15 s 上限会在斜坡差 0.25 rpm
+    # 走完时误触发"软停超时，强制撤使能"（真机当天每次停都撞）。改这个值必须
+    # 同步 main.cpp 的 kDisableGateBudgetSec（启动时有校验会报警）。
+    disable_timeout_cycles: 20000

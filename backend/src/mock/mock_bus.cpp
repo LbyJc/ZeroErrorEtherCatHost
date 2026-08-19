@@ -135,10 +135,13 @@ private:
                     target_cps = static_cast<double>(cmd_.target_velocity);
                     break;
                 case OpMode::CSP: {
-                    // 位置环：比例跟随，带速度饱和
+                    // 位置环：比例跟随，带速度饱和。
+                    // 增益 = 1/τ：8 时 τ=125ms，跑寿命正弦（±30°@0.25Hz，峰值
+                    // 47°/s）模拟跟随误差 5.9°，会把 5° 阶跃保护正当触发——
+                    // 真机位置环毫秒级滞后没这个问题。40 → τ=25ms，误差 1.2°。
                     const double err = static_cast<double>(cmd_.target_position) -
                                        static_cast<double>(out_counts_);
-                    target_cps = std::clamp(err * 8.0, -262144.0, 262144.0);
+                    target_cps = std::clamp(err * 40.0, -262144.0, 262144.0);
                     break;
                 }
                 case OpMode::CST: {

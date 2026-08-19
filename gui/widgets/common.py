@@ -137,6 +137,12 @@ class BitField(QWidget):
                 lb.setStyleSheet("background:transparent;color:#999;")
 
 
+def fmt_hms(seconds: float) -> str:
+    """秒 → "H:MM:SS"。负数/None 容错为 0（后端旧版本没有该字段时显示 0:00:00）。"""
+    s = int(seconds) if seconds and seconds > 0 else 0
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
 def group(title: str, widget: QWidget) -> QGroupBox:
     g = QGroupBox(title)
     lay = QVBoxLayout(g)

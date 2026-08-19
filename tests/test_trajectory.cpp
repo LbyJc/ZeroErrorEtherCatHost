@@ -2,6 +2,9 @@
 #include "ecjc/trajectory.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <string>
 
 using namespace ecjc;
 
@@ -167,6 +170,80 @@ TEST(梯形轨迹_反向) {
     Setpoint s{};
     t->eval(t->duration(), &s);
     CHECK_NEAR(s.pos_deg, -90.0, 1e-6);
+}
+
+namespace {
+// 在临时目录写一个轨迹 CSV，返回路径。与 test_config.cpp 同款做法。
+std::string writeTrajCsv(const std::string& tag, const std::string& body) {
+    auto p = std::filesystem::temp_directory_path() / ("ecjc_traj_test_" + tag + ".csv");
+    FILE* f = fopen(p.c_str(), "w");
+    fwrite(body.data(), 1, body.size(), f);
+    fclose(f);
+    return p.string();
+}
+}  // namespace
+
+TEST(CSV轨迹_CSP起点平移到当前实测位置) {
+    // 重复定位精度工况就地起测：CSV 里的位置是相对波形，
+    // start() 时整体平移到当前实测位置，否则第一拍就是位置阶跃。
+    TrajParams p;
+    p.type = TrajType::CsvFile;
+    p.csv_path = writeTrajCsv("csp_shift",
+                              "time,target\n0,0\n1,-10\n2,-10\n3,0\n");
+    std::string err;
+    auto t = makeTrajectory(p, &err);
+    CHECK(t != nullptr);
+
+    JointState q0{};
+    q0.output_pos_unwrapped_deg = 123.0;
+    t->start(q0, OpMode::CSP);
+    Setpoint s{};
+    t->eval(0.0, &s);  CHECK_NEAR(s.pos_deg, 123.0, 1e-9);   // 起点 = 当前位置
+    t->eval(1.5, &s);  CHECK_NEAR(s.pos_deg, 113.0, 1e-9);   // -10° 相对平移
+    t->eval(3.0, &s);  CHECK_NEAR(s.pos_deg, 123.0, 1e-9);   // 回到测试点
+    CHECK(s.finished);
+
+    // 重新 start 要按新位置重新锁存
+    q0.output_pos_unwrapped_deg = -7.0;
+    t->start(q0, OpMode::CSP);
+    t->eval(0.0, &s);  CHECK_NEAR(s.pos_deg, -7.0, 1e-9);
+}
+
+TEST(CSV轨迹_首点非零也平移到当前位置) {
+    // 平移量 = q0 - 首点值：不管文件首点写多少，eval(0) 都等于当前位置
+    TrajParams p;
+    p.type = TrajType::CsvFile;
+    p.csv_path = writeTrajCsv("csp_shift_nonzero",
+                              "time,target\n0,5\n1,15\n");
+    std::string err;
+    auto t = makeTrajectory(p, &err);
+    CHECK(t != nullptr);
+    JointState q0{};
+    q0.output_pos_unwrapped_deg = 100.0;
+    t->start(q0, OpMode::CSP);
+    Setpoint s{};
+    t->eval(0.0, &s);  CHECK_NEAR(s.pos_deg, 100.0, 1e-9);
+    t->eval(1.0, &s);  CHECK_NEAR(s.pos_deg, 110.0, 1e-9);
+}
+
+TEST(CSV轨迹_速度模式不平移) {
+    // 四列速度工况（现有节点周期测试）行为必须原样：速度列照发，
+    // 位置列不做任何平移（速度模式下 RT 也不读它）。
+    TrajParams p;
+    p.type = TrajType::CsvFile;
+    p.csv_path = writeTrajCsv("csv_vel",
+                              "time,target_position,target_velocity,target_torque\n"
+                              "0,0,0,0\n4,0,5,0\n24,0,5,0\n");
+    std::string err;
+    auto t = makeTrajectory(p, &err);
+    CHECK(t != nullptr);
+    JointState q0{};
+    q0.output_pos_unwrapped_deg = 55.0;
+    t->start(q0, OpMode::CSV);
+    Setpoint s{};
+    t->eval(4.0, &s);
+    CHECK_NEAR(s.vel_rpm, 5.0, 1e-9);
+    CHECK_NEAR(s.pos_deg, 0.0, 1e-9);    // 不平移
 }
 
 TEST(CSV轨迹_文件不存在时报人话) {

@@ -172,8 +172,8 @@ struct FrameHeader { uint32 magic='ECJC'; uint16 type; uint16 version; uint32 le
 混合的理由：遥测追求效率且 schema 稳定，用固定二进制；命令/状态/日志追求可读可扩展且频率极低，
 用 JSON。两者共用一条流，靠 `type` 区分，不需要第二个连接。
 
-`Sample` 的 144 字节布局在 `types.hpp` 里用 `static_assert(sizeof(Sample)==144)` 锁死，
-Python 侧 `struct` 格式串 `<q14d2i2I2HbBBB` 与之一一对应，并在 GUI 启动时用一条自检消息校验尺寸，
+`Sample` 的 200 字节布局在 `types.hpp` 里用 `static_assert(sizeof(Sample)==200)` 锁死，
+Python 侧 `struct` 格式串 `<q16d8i4I4H2hbBBB` 与之一一对应，并在 GUI 启动时用一条自检消息校验尺寸，
 **尺寸不匹配直接报错而不是画出乱码曲线**。
 
 ---
@@ -568,11 +568,13 @@ ethercat_joint_control/
 | `0x60FF` 单位 | `0x6064` 的 counts/s，`velocity_gain_correction` 现为 1.0（未应用任何实测速度标定；此前"增益 1.0006"是跟随误差与减速比推算的混合产物，不是单位标定） | 实测，100 rpm 电机侧 ↔ 7207 |
 | 支持模式 | `0x6502`=0x38D：pp/pv/tq/csp/csv/cst，**无 Homing** | SDO |
 
-Backend↔GUI 的 IPC 线格式：协议版本 `kProtocolVersion` = **2**（帧头里的 `version` 与
+Backend↔GUI 的 IPC 线格式：协议版本 `kProtocolVersion` = **3**（帧头里的 `version` 与
 GUI 的 `PROTOCOL_VERSION` 逐帧比对，不一致直接断连并停止自动重连）；`Sample` 结构体
-`sizeof` = **184 字节**（`backend/include/ecjc/types.hpp`，与 `gui/ipc_client.py` 的
+`sizeof` = **200 字节**（`backend/include/ecjc/types.hpp`，与 `gui/ipc_client.py` 的
 `SAMPLE_FORMAT` 逐字段对应，连接握手时用 pong 的 `sample_size` 再核一次）；HDF5 落盘
-按 `ECJC_SAMPLE_COLUMNS` 这一份宏展开建列，共 **37 列**（`backend/include/ecjc/data_logger.hpp`）。
+按 `ECJC_SAMPLE_COLUMNS` 这一份宏展开建列，共 **39 列**（`backend/include/ecjc/data_logger.hpp`）。
+v3 新增两列派生力矩：`motor_torque_Nm`（电机轴侧 = `actual_torque_Nm`÷减速比）与
+`torque_est_Nm`（`0x3B69` mNm→Nm；单位经 `0x3B6A` ≈ `0x3B69`/额定31Nm 真机数据交叉验证）。
 
 **输出侧分辨率的验证方法（半圈法）**：两侧编码器都是 32 位累加多圈量，
 不会在一圈处回绕，所以拿不到回绕模数，只能靠物理转角实测。

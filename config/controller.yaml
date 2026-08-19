@@ -48,9 +48,19 @@ controller:
     torque_Nm: 20.0
     torque_rate_Nm_per_s: 100.0      # 力矩变化率限制，防止阶跃冲击
 
-    # 目标速度变化率上限（电机侧 rpm/s）。0→100 rpm 需要 0.5 秒。
+    # 目标速度变化率上限，单位与速度目标值**同侧**（见 scaling.yaml 的
+    # target_velocity_is_motor_side）。现在目标是输出侧 rpm，
+    # 1.65 输出 rpm/s ≈ 200 电机 rpm/s，与原标定的物理斜坡一致。
     # 真机实测：不加这个限制，Constant 轨迹一开跑就是阶跃指令，
     # 驱动器实际速度跟不上 → 状态字 bit7 置位、0x3B68 报 0xFF00
     # 「软速度误差警告」（阈值见 0x3B61 Soft Velocity Following Error Window）。
     # 不是故障、不停机，但说明指令 profile 太生硬。
-    velocity_rate_rpm_per_s: 200.0
+    velocity_rate_rpm_per_s: 1.65
+
+    # CSP 运行期位置目标的斜坡速度（输出侧 °/s），**只对 Constant 常值轨迹
+    # 生效**：常值的绝对角度目标一步下发就是位置阶跃，会被 5° 阶跃兜底拒绝
+    # 并软停（表现为"点开始运行没反应"），所以做成匀速斜坡。
+    # 正弦/三角/梯形/CSV 轨迹从当前位置连续起步、自带斜率，不受此限
+    # （寿命摆臂正弦 ±30°@0.25Hz 峰值 47.1 °/s，压了波形就错了）。
+    # 15 °/s = 输出侧 2.5 rpm；最大别超过 150（= 输出侧上限 25 rpm）。
+    csp_position_rate_deg_per_s: 15.0

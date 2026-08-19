@@ -15,10 +15,12 @@ from PySide6.QtWidgets import (
 from .common import COLOR_ERR, COLOR_OK, COLOR_WARN
 
 MODES = ["PP", "PV", "PT", "Homing", "CSP", "CSV", "CST"]
-# 各模式下 Target 的物理单位
+# 各模式下 Target 的物理单位。
+# rpm 模式的"哪一侧"由 scaling.yaml 的 target_velocity_is_motor_side 决定，
+# 提示文字与量程在 _sync_units 里按该配置动态生成，别在这里写死。
 MODE_UNIT = {
-    "PP": ("deg", "输出侧角度"), "CSP": ("deg", "输出侧角度"),
-    "PV": ("rpm", "电机侧转速"), "CSV": ("rpm", "电机侧转速"),
+    "PP": ("deg", "输出法兰绝对角度"), "CSP": ("deg", "输出法兰绝对角度"),
+    "PV": ("rpm", ""), "CSV": ("rpm", ""),
     "PT": ("Nm", "力矩"), "CST": ("Nm", "力矩"),
     "Homing": ("—", ""),
 }
@@ -100,12 +102,14 @@ class ModePanel(QWidget):
         # ── 目标值 ──────────────────────────────────────────────────
         tarbox = QGroupBox("目标值")
         tar = QHBoxLayout(tarbox)
-        self.target = _spin(-100000, 100000, 3, 100.0, 1.0)
+        # 初值 2.0：目标值现在默认是输出侧 rpm（≈242 电机 rpm），
+        # 沿用旧默认 100 会被输出侧量程钳到上限 25 rpm，开机默认值不该顶满量程。
+        self.target = _spin(-100000, 100000, 3, 2.0, 1.0)
         self.target.valueChanged.connect(
             lambda v: self.command.emit({"cmd": "set_target", "value": v}))
         self.target_unit = QLabel("rpm")
         self.target_unit.setStyleSheet("font-weight:bold;")
-        self.target_hint = QLabel("电机侧转速")
+        self.target_hint = QLabel("")
         self.target_hint.setStyleSheet("color:#666;")
         tar.addWidget(QLabel("Target"))
         tar.addWidget(self.target, 1)
@@ -268,17 +272,22 @@ class ModePanel(QWidget):
 
     def _sync_units(self):
         unit, hint = MODE_UNIT.get(self._mode, ("—", ""))
-        self.target_unit.setText(unit)
-        self.target_hint.setText(hint)
+        limits = self.cfg.scaling.get("limits", {})
         if unit == "rpm":
-            self.target.setRange(-self.cfg.scaling.get("limits", {}).get(
-                "motor_velocity_rpm_max", 3000),
-                self.cfg.scaling.get("limits", {}).get("motor_velocity_rpm_max", 3000))
+            # 速度目标哪一侧由 Backend 配置决定，GUI 只跟着显示，
+            # 不然界面写"电机侧"而 Backend 按输出侧换算，出的就是 121 倍的事故
+            motor_side = self.cfg.scaling.get("target_velocity_is_motor_side", True)
+            hint = "电机侧转速" if motor_side else "输出侧转速"
+            lim = (limits.get("motor_velocity_rpm_max", 3000) if motor_side
+                   else limits.get("output_velocity_rpm_max", 25))
+            self.target.setRange(-lim, lim)
         elif unit == "Nm":
-            lim = self.cfg.scaling.get("limits", {}).get("torque_Nm_max", 20)
+            lim = limits.get("torque_Nm_max", 20)
             self.target.setRange(-lim, lim)
         else:
             self.target.setRange(-1e6, 1e6)
+        self.target_unit.setText(unit)
+        self.target_hint.setText(hint)
 
     def push_initial(self):
         """连上 Backend 后把界面上显示的初值真正下发一次。
@@ -346,9 +355,16 @@ class ModePanel(QWidget):
         self.ctrl_combo.setEnabled(not self._running)
         self.btn_apply_traj.setEnabled(not self._running)
 
+        # 后端的 last_error 在 start_run 时被清空，所以非空就一定是
+        # 上一次运行的中止原因（如 CSP 阶跃保护拒发）。以前这个字段
+        # GUI 任何地方都不显示，"点开始运行没反应"根本无从排查。
+        last_err = g("last_error", "") or ""
         if self._running:
             self.run_hint.setText(f"运行中 {g('run_time_s', 0):.1f} s")
             self.run_hint.setStyleSheet(f"color:{COLOR_OK}; font-size:11px;")
+        elif last_err:
+            self.run_hint.setText(f"上次运行中止：{last_err}")
+            self.run_hint.setStyleSheet(f"color:{COLOR_ERR}; font-size:11px;")
         elif self._can_run:
             self.run_hint.setText("条件满足，可以开始运行")
             self.run_hint.setStyleSheet(f"color:{COLOR_OK}; font-size:11px;")

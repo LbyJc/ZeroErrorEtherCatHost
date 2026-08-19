@@ -249,11 +249,30 @@ void RealtimeTask::cycle(int64_t now_ns) {
     // ── 2. 物理量换算 ───────────────────────────────────────────────────
     scaling_.toPhysical(raw_, &joint_);
 
+    // ── 关节转动时长（2026-08-18）───────────────────────────────────────
+    // 按实测转速判定（不是下发目标）：堵转不计时、软停尾段（<阈值）不计时。
+    // total 不分运行内外——使能状态下被重力蠕动拖着转、CSP 挪位置都算磨损时间。
+    if (reset_session_moving_req_.exchange(false, std::memory_order_acq_rel))
+        session_moving_ns_ = 0;
+    if (isJointMoving(joint_.output_vel_rpm)) {
+        const int64_t dt_ns = static_cast<int64_t>(cfg_.ethercat.cycle_us) * 1000;
+        session_moving_ns_ += dt_ns;
+        total_moving_ns_.fetch_add(dt_ns, std::memory_order_relaxed);
+    }
+
     // ── 3. 参数 / CiA402 ────────────────────────────────────────────────
     params_.refreshIfChanged(&param_view_);
 
     if (fault_reset_req_.exchange(false, std::memory_order_acq_rel))
         cia_.requestFaultReset(20);
+
+    // start_run 时清掉上一次的 last_error（snap_ 归 RT 线程所有，seqlock 写侧，
+    // IPC 线程不能直接碰，走和 fault_reset 一样的原子请求模式）。
+    // 这样 GUI 只要看到非空 last_error 就一定是"本次或上次运行"的新错误。
+    if (clear_error_req_.exchange(false, std::memory_order_acq_rel)) {
+        snap_.last_error[0] = '\0';
+        last_error_latched_ = false;
+    }
 
     // 撤使能类目标必须等软停真正完成。否则控制字下一拍就切电，
     // 而斜坡还在数——手册 §7.1：>2.5 rpm 抱闸会永久损坏运动组件。
@@ -277,9 +296,16 @@ void RealtimeTask::cycle(int64_t now_ns) {
                 if (!last_error_latched_) {
                     // 只在超时刚发生的这一拍写一次，不要每拍重跑 %f snprintf
                     // 且永久覆盖 last_error（Minor finding）。
+                    // stopping/斜坡余量是诊断信息：2026-08-18 真机上出现过从
+                    // 低速停也走满超时的未解之谜（mock 复现不出），下次发生时
+                    // 这两个数能直接指认是"斜坡没走完"还是"转速压不下去"。
                     snprintf(snap_.last_error, sizeof snap_.last_error,
-                             "软停超时（%llu 拍），强制撤使能，转速 %.2f rpm",
-                             (unsigned long long)disable_wait_cycles_, joint_.output_vel_rpm);
+                             "软停超时（%llu 拍），强制撤使能，转速 %.2f rpm"
+                             "（stopping=%d 斜坡余量 %.2f rpm）",
+                             (unsigned long long)disable_wait_cycles_,
+                             joint_.output_vel_rpm,
+                             stopping_.load(std::memory_order_relaxed) ? 1 : 0,
+                             out_.target_vel_rpm);
                     last_error_latched_ = true;
                 }
             }
@@ -321,6 +347,7 @@ void RealtimeTask::cycle(int64_t now_ns) {
 
     // ── 6. 轨迹 + 控制器 ────────────────────────────────────────────────
     if (running) {
+        csp_idle_hold_.latched = false;   // 运行期间轨迹接管目标，停止后第一拍重新锁存
         if (run_start_ns_ == 0) {
             run_start_ns_ = now_ns;
             traj_->start(joint_, want_mode);
@@ -384,6 +411,22 @@ void RealtimeTask::cycle(int64_t now_ns) {
             out_.target_vel_rpm = last_out_.target_vel_rpm +
                                   (dv > 0 ? vmax_step : -vmax_step);
     }
+    // CSP 位置目标同样要限变化率（输出侧 °/s）。CSP 下驱动器不做 profile
+    // 规划，Constant 轨迹的绝对角度目标一步下发就是位置阶跃，会被下面的
+    // 阶跃兜底拒绝并软停——2026-08-13 真机：目标 202°、当前 109°，
+    // 点【开始运行】第一拍即中止，GUI 看起来"没反应"。软件斜坡起点是
+    // 上一拍的下发值（空闲时 = 锁存的保持位置，正好无缝衔接）。
+    //
+    // 只对 Constant 轨迹生效：正弦/三角/梯形/CSV 都从当前位置连续起步，
+    // 没有阶跃风险（阶跃兜底仍在兜底），而寿命摆臂正弦 ±30° @0.25Hz 的
+    // 峰值速度是 47.1 °/s——若被 15 °/s 斜坡限住会把正弦削成三角波，
+    // 实验波形就错了。
+    if (running && want_mode == OpMode::CSP &&
+        traj_is_constant_.load(std::memory_order_relaxed)) {
+        const double pmax_step = cfg_.controller.csp_position_rate_deg_per_s * dt;
+        out_.target_pos_deg = slewLimit(out_.target_pos_deg,
+                                        last_out_.target_pos_deg, pmax_step);
+    }
     last_out_ = out_;
 
     // ── 8. 组装输出 PDO ─────────────────────────────────────────────────
@@ -405,6 +448,10 @@ void RealtimeTask::cycle(int64_t now_ns) {
         if (guard.triggered) {
             stopping_.store(true, std::memory_order_relaxed);
             run_req_.store(false, std::memory_order_relaxed);
+            // 空闲保持的锁存值也重置到实测位置：不然锁存目标与实测偏差
+            // 一旦超阈值（如外力强行搬动关节），这里会每拍触发、每拍重跑
+            // snprintf——接受现实，从新位置继续保持。
+            csp_idle_hold_.hold_deg = joint_.output_pos_unwrapped_deg;
             snprintf(snap_.last_error, sizeof snap_.last_error,
                      "CSP 目标位置阶跃 %.3f° 超过上限 %.3f°，已拒绝下发并软停",
                      std::fabs(guard.err_deg), cfg_.scaling.csp_target_jump_deg_max);
@@ -482,6 +529,9 @@ void RealtimeTask::cycle(int64_t now_ns) {
     snap_.joint = joint_;
     snap_.ref = ref_;
     snap_.run_time_s = run_start_ns_ ? double(now_ns - run_start_ns_) / 1e9 : 0.0;
+    snap_.moving_time_s = double(session_moving_ns_) / 1e9;
+    snap_.total_moving_time_s =
+        double(total_moving_ns_.load(std::memory_order_relaxed)) / 1e9;
     std::atomic_thread_fence(std::memory_order_release);
     snap_seq_.fetch_add(1, std::memory_order_release);       // → 偶数
 
@@ -510,20 +560,31 @@ void RealtimeTask::safeStopRamp(ControlOutput* o) {
             break;
         }
         case OpMode::CSP:
-        default:
-            o->target_pos_deg = cspStopTarget(cfg_.stop_ramp,
-                                              hold_position_deg_,
-                                              joint_.output_pos_unwrapped_deg);
+        default: {
+            // 2026-08-13 真机 finding：这里原来直接下发"当前实测位置"，
+            // 参考每拍跟着反馈走 → 位置环零刚度，摆臂重力以粘滑蠕动把关节
+            // 持续拖走（使能不点 Run，电机侧 0~20 rpm 波动下坠）。
+            // 现在"可保持"期间锁存一次并钉住；未使能/模式未生效时退回跟随。
+            const bool can_hold = (cia_.state() == Cia402State::OperationEnabled) &&
+                                  mode_matched_ && m == OpMode::CSP;
+            const double held = cspIdleHoldTarget(&csp_idle_hold_, can_hold,
+                                                  joint_.output_pos_unwrapped_deg);
+            o->target_pos_deg = cspStopTarget(cfg_.stop_ramp, hold_position_deg_, held);
             done = true;
             break;
+        }
     }
     if (done) stopping_.store(false, std::memory_order_relaxed);
 }
 
 void RealtimeTask::buildSample(Sample* s, int64_t now_ns) {
+    // elapsed 用【单调钟】算（now_ns 是本周期的 CLOCK_MONOTONIC，epoch 也是
+    // 单调钟基准）：450h 持续运行工况断网跑，中途插网线 NTP 跳变校时/手动改
+    // 时间都动不了文件内时间轴。system_time_ns 保留墙钟，做跨文件绝对对齐
+    // 与人读对照——它跳只影响绝对时刻标注，seq 与 elapsed 保证文件内完整。
     const int64_t epoch = record_epoch_ns_.load(std::memory_order_relaxed);
     s->system_time_ns = nowRealtimeNs();
-    s->elapsed_time_s = epoch ? double(s->system_time_ns - epoch) / 1e9 : 0.0;
+    s->elapsed_time_s = epoch ? double(now_ns - epoch) / 1e9 : 0.0;
 
     s->motor_position_unwrapped_deg  = joint_.motor_pos_unwrapped_deg;
     s->motor_position_deg            = joint_.motor_pos_deg;
@@ -537,7 +598,13 @@ void RealtimeTask::buildSample(Sample* s, int64_t now_ns) {
     s->target_velocity_rpm           = ref_.vel_rpm;
     s->target_torque_Nm              = out_.target_trq_Nm;
     s->position_error_deg            = ref_.pos_deg - joint_.output_pos_unwrapped_deg;
-    s->velocity_error_rpm            = ref_.vel_rpm - joint_.motor_vel_rpm;
+    // 速度误差必须与目标值同侧比：target_velocity_is_motor_side 决定
+    // ref_.vel_rpm 是电机侧还是输出侧（2026-08-13 起配置为输出侧）
+    s->velocity_error_rpm            = ref_.vel_rpm -
+        (cfg_.scaling.target_velocity_is_motor_side ? joint_.motor_vel_rpm
+                                                    : joint_.output_vel_rpm);
+    s->motor_torque_Nm               = joint_.torque_Nm / cfg_.scaling.gear_ratio;
+    s->torque_est_Nm                 = raw_.vendor_torque / 1000.0;
 
     s->motor_position_raw  = joint_.motor_pos_raw;
     s->output_position_raw = joint_.output_pos_raw;
@@ -565,7 +632,6 @@ void RealtimeTask::buildSample(Sample* s, int64_t now_ns) {
     if (run_req_.load(std::memory_order_relaxed)) s->flags |= kFlagRunning;
     if (recording_.load(std::memory_order_relaxed)) s->flags |= kFlagRecording;
     if (cia_.state() == Cia402State::Fault) s->flags |= kFlagFault;
-    (void)now_ns;
 }
 
 // ── IPC 线程侧接口 ────────────────────────────────────────────────────────
@@ -658,6 +724,8 @@ bool RealtimeTask::checkRunPreconditions(std::string* err) {
 
 bool RealtimeTask::startRun(std::string* err) {
     if (!checkRunPreconditions(err)) return false;
+    clear_error_req_.store(true);   // 新一次运行开始，旧的中止原因作废
+    reset_session_moving_req_.store(true);   // 本次转动时长按运行分段，开始即清零
     stopping_.store(false);
     run_start_ns_ = 0;
     run_req_.store(true);

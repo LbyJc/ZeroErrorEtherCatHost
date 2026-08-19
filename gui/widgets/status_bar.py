@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QWidget
 
-from .common import StatusLamp
+from .common import StatusLamp, fmt_hms
 
 
 class TopStatusBar(QWidget):
@@ -23,11 +23,17 @@ class TopStatusBar(QWidget):
         self.record = StatusLamp("Record")
         self.cycle = StatusLamp("Cycle")
         self.jitter = StatusLamp("Jitter")
+        # 关节转动时长（2026-08-18）：只统计 |输出侧转速|>0.5rpm 的时间，
+        # 不转就暂停。本次按运行分段，累计跨重启续算（450h 寿命对照）。
+        self.moving = StatusLamp("本次转动")
+        self.total_moving = StatusLamp("累计转动")
 
         for w in (self.master, self.ethercat, self.slave, self.servo, self.mode,
-                  self.run, self.record, self.cycle, self.jitter):
+                  self.run, self.record, self.cycle, self.jitter,
+                  self.moving, self.total_moving):
             lay.addWidget(w)
         lay.addStretch(1)
+        self._last_total_moving = None   # 上一帧累计值，用于判断"正在转"
 
     def setFrameStyleHack(self):
         self.setStyleSheet("background:#f5f5f5; border-bottom:1px solid #ddd;")
@@ -98,6 +104,28 @@ class TopStatusBar(QWidget):
             f"错过周期 {miss} 次 / 共 {g('cycles', 0)} 周期\n"
             "（本机内核为 PREEMPT_DYNAMIC，非 PREEMPT_RT，"
             "几十微秒抖动属正常范围）")
+
+        # ── 关节转动时长 ────────────────────────────────────────────────
+        mv = g("moving_time_s", None)
+        tot = g("total_moving_time_s", None)
+        if mv is None or tot is None:
+            # 旧版后端没有这两个字段：显示占位而不是 0，免得被当成真读数
+            self.moving.set_state("idle", "—", "后端版本过旧，无转动时长字段")
+            self.total_moving.set_state("idle", "—", "后端版本过旧，无转动时长字段")
+        else:
+            # 累计值比上一帧涨了 = 关节正在转（阈值判定在后端 RT 里做）
+            turning = (self._last_total_moving is not None
+                       and tot > self._last_total_moving)
+            self._last_total_moving = tot
+            tip = ("只统计关节实际转动的时间（|输出侧转速| > 0.5 rpm），"
+                   "不转自动暂停。\n本次运行从点【开始运行】起计，结束后停住，"
+                   "下次开始清零。")
+            self.moving.set_state("active" if turning else "idle",
+                                  fmt_hms(mv), tip)
+            self.total_moving.set_state(
+                "active" if turning else "idle", f"{tot / 3600.0:.1f} h",
+                f"精确值 {fmt_hms(tot)}\n跨重启续算；清零入口在【系统配置】页。\n"
+                f"寿命实验目标 450 h。")
 
     def update_recording(self, rec: dict):
         active = bool(rec.get("active"))

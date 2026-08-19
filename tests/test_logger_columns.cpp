@@ -59,6 +59,58 @@ TEST(writer_persists_all_samples_through_real_datalogger) {
     CHECK_EQ((int)logger.status().samples, (int)kN);
 }
 
+// 真机 bug（2026-08-13）：RT 线程每拍都在产样，record_start 前缓冲环里残留的
+// 样本带着「上一次采集」的基准时刻，开档后被一并写进新文件——实测首样本
+// elapsed_time_s = 868s（= 距上次采集开始的时间）。修复：RecordingMeta.
+// start_epoch_ns 记录本次基准，writer 在会话开头丢弃 system_time_ns 早于
+// 基准的残留样本（不能盲清环：SPSC 只许 writer 消费，且盲清会误删开档后
+// 立刻到达的正常样本）。
+TEST(writer_discards_samples_older_than_record_epoch) {
+    auto dir = std::filesystem::temp_directory_path() / "ecjc_logger_epoch_test";
+    std::filesystem::create_directories(dir);
+
+    FullConfig cfg;
+    cfg.app.data_dir = dir.string();
+
+    SpscRing<Sample> ring;
+    ring.init(256);
+
+    DataLogger logger(cfg, &ring);
+    logger.setMinFreeGb(0.0);
+
+    const int64_t epoch = 1'000'000'000;   // 本次采集的基准墙钟(ns)
+    // start 前环里躺着 5 个旧基准样本（墙钟早于 epoch，elapsed 还是上次的量级）
+    for (int i = 0; i < 5; ++i) {
+        Sample s{};
+        s.system_time_ns = epoch - 5000 + i;
+        s.elapsed_time_s = 868.0;
+        ring.push(s);
+    }
+
+    RecordingMeta meta;
+    meta.test_name = "epoch_test";
+    meta.start_epoch_ns = epoch;
+    std::string err;
+    CHECK(logger.start(meta, &err));
+
+    constexpr size_t kGood = 20;
+    for (size_t i = 0; i < kGood; ++i) {
+        Sample s{};
+        s.system_time_ns = epoch + static_cast<int64_t>(i) * 1000;
+        s.elapsed_time_s = i * 1e-3;
+        s.seq = static_cast<uint32_t>(i);
+        ring.push(s);
+    }
+
+    for (int i = 0; i < 300 && logger.status().samples < kGood && logger.status().active; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    logger.stop();
+
+    // 旧样本一个都不许进文件；正常样本一个不少
+    CHECK_EQ((int)logger.status().samples, (int)kGood);
+}
+
 // 列名不得重复（重复会让 H5Dcreate2 失败或后一列覆盖前一列）
 TEST(column_names_are_unique) {
     auto names = sampleColumnNames();
@@ -79,4 +131,6 @@ TEST(required_columns_present) {
     CHECK(has("output_position_raw"));
     CHECK(has("seq"));        // 现在缺，事后无法从文件检测丢包
     CHECK(has("flags"));      // 现在缺
+    CHECK(has("motor_torque_Nm"));   // v3：电机轴侧实际力矩（0x6077÷减速比）
+    CHECK(has("torque_est_Nm"));     // v3：厂商传递力矩估计（0x3B69 mNm→Nm）
 }

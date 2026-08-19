@@ -70,12 +70,14 @@ fi
 
 # ── 4. 安装文件 ─────────────────────────────────────────────────────────
 info "安装到 $PREFIX"
-install -d "$PREFIX"/{bin,gui,docs,share,tools}
+install -d "$PREFIX"/{bin,gui,docs,share,tools,experiments}
 install -m 755 "$SRC/build/ecjc-backend" "$PREFIX/bin/"
 install -m 755 "$SRC/system/ecjc-helper" "$PREFIX/bin/"
 cp -r "$SRC/gui/." "$PREFIX/gui/"
 cp -r "$SRC/docs/." "$PREFIX/docs/" 2>/dev/null || true
 [[ -d "$SRC/tools" ]] && cp -r "$SRC/tools/." "$PREFIX/tools/" || true
+# 实验配置（一键实验的配置列表）与工况轨迹文件——GUI 按 <root>/experiments/presets 找
+[[ -d "$SRC/experiments" ]] && cp -r "$SRC/experiments/." "$PREFIX/experiments/" || true
 
 # GUI 启动器：把 conda 环境固化进去，用户不需要手动 activate
 cat > "$PREFIX/bin/ecjc-gui" <<EOF

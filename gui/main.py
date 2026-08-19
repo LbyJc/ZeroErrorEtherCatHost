@@ -51,6 +51,19 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("EtherCAT Joint Control")
+    # 本机 Wayland/GNOME 的 xdg-desktop-portal 文件选择器会偶发无法映射窗口
+    # （mutter: "surface_state_changed: assertion 'wl_window->has_last_sent_
+    # configuration' failed"），原生对话框永不显示，而 Qt 阻塞在嵌套事件循环里
+    # 等它返回——主窗口被模态锁死、连关都关不掉（2026-08-13 真机，py-spy 抓到
+    # 栈停在 QFileDialog.getExistingDirectory）。全局改用 Qt 自绘对话框，
+    # 不依赖 portal 进程状态。
+    QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
+    # 自绘对话框的按钮/标签是 Qt 自己的文案，装上官方中文翻译（qtbase_zh_CN）
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+    qt_tr = QTranslator(app)
+    if qt_tr.load(QLocale.system(), "qtbase", "_",
+                  QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(qt_tr)
 
     cfg = GuiConfig(Path(args.config) if args.config else None)
 

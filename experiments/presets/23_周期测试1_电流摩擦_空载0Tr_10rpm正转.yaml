@@ -1,0 +1,16 @@
+# 由 generate_profiles.py 生成，改参数请改脚本后重新生成
+name: 周期测试1_电流摩擦_空载0Tr_10rpm正转
+kind: node
+mode: CSV
+description: |
+  电流与摩擦基线（§4.3），空载0Tr：10 rpm 正转，恒速 20 s，全程约 38 秒。
+  5 rpm 的电流摩擦数据来自同载荷档的周期测试2 合并工况，无需单独跑。
+  开始前确认：① 加载装置已【机械脱开】（不是归零）；② 已 Servo Enable。
+  跑完自动停止采集、数据落盘并弹出完成提示，无需手动点结束。
+trajectory:
+  type: csv
+  csv_path: ../工况/周期测试1_电流摩擦_空载0Tr_10rpm正转.csv
+record:
+  test_item: current
+  load_percent_Tr: 0
+  speed_rpm_target: 10

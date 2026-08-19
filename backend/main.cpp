@@ -19,6 +19,7 @@
 
 #include "ecjc/config.hpp"
 #include "ecjc/data_logger.hpp"
+#include "ecjc/moving_time_store.hpp"
 #include "ecjc/ethercat_bus.hpp"
 #include "ecjc/ipc_server.hpp"
 #include "ecjc/realtime_task.hpp"
@@ -134,8 +135,11 @@ int acquireInstanceLock(const std::string& sock_path) {
 //                            制动器动作等待、deactivate/release/join 的
 //                            系统调用开销）的余量。
 constexpr int kDisconnectWaitSec    = 20;
-constexpr int kDisableGateBudgetSec = 15;
-constexpr int kShutdownWatchdogSec  = kDisconnectWaitSec + kDisableGateBudgetSec + 5;  // 40s
+// 2026-08-18 从 15 提到 20：持续运行 25 rpm 的软停斜坡要 25/1.65 ≈ 15.2 s，
+// 与 trajectory.yaml 的 disable_timeout_cycles=20000 同步（那边也有注释互指）。
+constexpr int kDisableGateBudgetSec = 20;
+constexpr int kShutdownWatchdogSec  = kDisconnectWaitSec + kDisableGateBudgetSec + 5;  // 45s
+// systemd unit 的 TimeoutStopSec=50 > 45，仍然成立；再改看门狗时要一起看。
 
 /// 关闭兜底：正常停机流程若卡住，kShutdownWatchdogSec 秒后强制退出。
 /// 现场遇到过 SIGTERM 之后进程释放了主站却一直不退，留下孤儿进程。
@@ -219,6 +223,20 @@ int main(int argc, char** argv) {
     DataLogger logger(cfg, &rt.logRing());
     IpcServer ipc(cfg, &rt, &logger);
 
+    // 累计转动时长跨重启续算（2026-08-18，450h 寿命计数）。
+    // 文件放 log_dir 下：部署环境 = /var/lib/ethercat-joint-control/logs，
+    // 不新增配置项、不动 /etc。主循环每 30s 落盘，清零命令即时落盘。
+    MovingTimeStore moving_store(cfg.app.log_dir + "/moving_time_total_ns");
+    rt.setTotalMovingNs(moving_store.load());
+    printf("[INFO] 累计转动时长已装载: %.2f h（%s）\n",
+           rt.totalMovingNs() / 3.6e12, moving_store.path().c_str());
+    auto persist_moving = [&] {
+        std::string e;
+        if (!moving_store.save(rt.totalMovingNs(), &e))
+            fprintf(stderr, "[WARN] 累计转动时长落盘失败: %s\n", e.c_str());
+    };
+    ipc.setPersistMovingTimeAction(persist_moving);
+
     // 启动主站的完整流程（任务书第七、八节）。每一步都回报 GUI。
     auto connect = [&](std::string* e) -> bool {
         if (bus->phase() == BusPhase::Active) { *e = "主站已在运行"; return false; }
@@ -263,7 +281,8 @@ int main(int argc, char** argv) {
         (void)e;
         rt.stopRun();
         // 等软停真正走完，而不是拍一个固定的 300ms。
-        // 按 csv_decel_rpm_per_s=200，从 3000 电机 rpm 减到零需 15 s；
+        // 按 csv_decel_rpm_per_s=1.65（输出侧，≈电机侧 200），
+        // 从输出侧上限 25 rpm（≈3000 电机 rpm）减到零需 15 s；
         // kDisconnectWaitSec 与看门狗预算 kShutdownWatchdogSec 来自同一份推导
         // （见 armShutdownWatchdog() 前的注释），不要在这里单独改数字。
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kDisconnectWaitSec);
@@ -326,7 +345,20 @@ int main(int argc, char** argv) {
         printf("[INFO] 等待 GUI 下达【启动主站】命令（app.yaml 里 auto_start_master=false）\n");
     }
 
-    while (!g_quit) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    {
+        // 看护循环兼做累计转动时长的周期落盘：值没变（关节没转）就不写，
+        // 450h 持续运行期间每 30s 一次 rename，对机械硬盘也毫无压力。
+        int64_t last_saved_ns = rt.totalMovingNs();
+        int tick = 0;
+        while (!g_quit) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (++tick >= 300) {          // 300 × 100ms = 30s
+                tick = 0;
+                const int64_t cur = rt.totalMovingNs();
+                if (cur != last_saved_ns) { persist_moving(); last_saved_ns = cur; }
+            }
+        }
+    }
 
     printf("\n[INFO] 收到退出信号，安全停机中...\n");
     fflush(stdout);
@@ -335,6 +367,7 @@ int main(int argc, char** argv) {
     if (bus->phase() == BusPhase::Active) disconnect(&e);
     logger.stop();
     ipc.stop();
+    persist_moving();                     // 退出前把最后不足 30s 的增量也落盘
     ::close(lock_fd);
     printf("[INFO] 已退出\n");
     return 0;

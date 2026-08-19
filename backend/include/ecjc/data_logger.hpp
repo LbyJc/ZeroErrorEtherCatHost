@@ -38,6 +38,11 @@ struct RecordingMeta {
     std::string software_version;
     std::string start_time;
     std::string end_time;
+    // 本次采集的基准墙钟（REALTIME ns，与 setRecordEpoch 同一个值）。
+    // writer 在会话开头丢弃 system_time_ns 早于它的残留样本——RT 线程每拍都在
+    // 产样，环里可能躺着上一次采集基准的旧样本（真机实测首样本 elapsed=868s）。
+    // 0 = 不过滤（兼容不经 IPC 的直接调用/旧测试）。
+    int64_t start_epoch_ns = 0;
 
     // ── P2 实验元数据（一键按钮填充；空则不写对应 attr）──────────────
     std::string sample_id;
@@ -120,7 +125,9 @@ struct RecordingStatus {
     X(error_code,             H5T_NATIVE_UINT16, U16, s[i].error_code)             \
     X(temperature_drive_C,    H5T_NATIVE_UINT16, U16, s[i].temperature_drive_C)    \
     X(torque_actual_permille, H5T_NATIVE_INT16,  I16, s[i].torque_actual_permille) \
-    X(torque_ratio,           H5T_NATIVE_INT16,  I16, s[i].torque_ratio)
+    X(torque_ratio,           H5T_NATIVE_INT16,  I16, s[i].torque_ratio)           \
+    X(motor_torque_Nm,        H5T_NATIVE_DOUBLE, D,   s[i].motor_torque_Nm)        \
+    X(torque_est_Nm,          H5T_NATIVE_DOUBLE, D,   s[i].torque_est_Nm)
 
 /// 列总数（等于 kCols[] 的元素个数）
 size_t sampleColumnCount();
@@ -150,6 +157,9 @@ private:
     std::thread th_;
     std::atomic<bool> quit_{false};
     std::atomic<bool> active_{false};
+    // 会话刚开始（writer 还没见到 ≥start_epoch_ns 的样本）。start() 置位，
+    // writer 见到第一个合法样本后清除。
+    std::atomic<bool> fresh_start_{false};
 
     RecordingMeta meta_;
     std::string cur_path_;
@@ -160,6 +170,13 @@ private:
 
     mutable std::mutex st_mu_;
     RecordingStatus st_;
+
+    // 串行化 writer 的「popBatch+writeBatch」与 stop() 的 closeFile()。
+    // 没有它，stop() 看到 ring 空就关文件，但 writer 可能刚 pop 出最后一批
+    // 正在逐列 extend——文件在半途被关，前几列比后几列多一个批次
+    // （2026-08-13 真机：elapsed 105163 行 vs 其余 105158，CSV 导出崩）。
+    // 锁序：io_mu_ → st_mu_（writeBatch 失败路径），反向绝不允许。
+    std::mutex io_mu_;
 };
 
 }  // namespace ecjc

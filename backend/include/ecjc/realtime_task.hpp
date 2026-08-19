@@ -42,6 +42,12 @@ struct StatusSnapshot {
     JointState joint;
     Setpoint   ref;
     double     run_time_s = 0;
+    /// 关节转动时长（|输出侧转速| > kMovingRpmThreshold 才累加，见 config.hpp）。
+    /// moving_time_s 按「本次运行」分段：start_run 清零，结束后停住可读；
+    /// total_moving_time_s 不分运行内外，只要在转就累加，跨重启由
+    /// MovingTimeStore 落盘续算（main.cpp 负责装载与周期写盘）。
+    double     moving_time_s = 0;
+    double     total_moving_time_s = 0;
     char       last_error[128] = {0};
 };
 static_assert(std::is_trivially_copyable<StatusSnapshot>::value,
@@ -82,8 +88,20 @@ public:
     /// 填进 RecordingMeta。
     IEtherCATBus* bus() const { return bus_; }
 
+    // ── 关节转动时长（2026-08-18）────────────────────────────────────
+    /// main.cpp 启动时把落盘的累计值装回来（RT 线程启动前调用）。
+    void setTotalMovingNs(int64_t ns) { total_moving_ns_.store(ns, std::memory_order_relaxed); }
+    /// 供 main.cpp 周期写盘。RT 侧只做 fetch_add，任意线程读都一致。
+    int64_t totalMovingNs() const { return total_moving_ns_.load(std::memory_order_relaxed); }
+    /// GUI 清零累计（IPC 线程调用）。直接 store(0)：RT 只 fetch_add，
+    /// 竞态窗口最多多算一拍（≤1ms），不需要走请求标志。
+    void resetTotalMovingTime() { total_moving_ns_.store(0, std::memory_order_relaxed); }
+
     void setRecording(bool on) { recording_.store(on, std::memory_order_relaxed); }
-    void setRecordEpoch(int64_t ns) { record_epoch_ns_.store(ns, std::memory_order_relaxed); }
+    /// 本次采集的 elapsed 基准。必须传 CLOCK_MONOTONIC（与 RT 周期同一个钟）：
+    /// elapsed_time_s = 周期单调时刻 − 此基准。不许换回墙钟——断网 450h 中途
+    /// 联网 NTP 跳变校时会弄断文件内时间轴（墙钟对照另有 system_time_ns 列）。
+    void setRecordEpoch(int64_t mono_ns) { record_epoch_ns_.store(mono_ns, std::memory_order_relaxed); }
 
 private:
     void threadMain();
@@ -111,12 +129,19 @@ private:
     std::atomic<bool> fault_reset_req_{false};
     std::atomic<int>  desired_mode_{static_cast<int>(OpMode::CSV)};
     std::atomic<bool> run_req_{false};
+    // start_run 请求清除 last_error：snap_ 是 RT 线程私有（seqlock 写侧），
+    // IPC 线程通过这个原子标志请求，RT 在 cycle 顶部执行清除。
+    std::atomic<bool> clear_error_req_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<double> target_value_{0.0};
     /// 仅 Constant 轨迹允许被 GUI 的【目标值】实时覆盖
     std::atomic<bool> traj_is_constant_{true};
     std::atomic<bool> recording_{false};
     std::atomic<int64_t> record_epoch_ns_{0};
+    // 关节转动时长。total 是原子量（IPC 线程要读/清零/装载），
+    // session 是 RT 私有，start_run 经请求标志清零（同 clear_error_req_ 模式）。
+    std::atomic<int64_t> total_moving_ns_{0};
+    std::atomic<bool> reset_session_moving_req_{false};
 
     // 轨迹/控制器热替换。
     // IPC 线程构造好新对象 → 原子放进 pending_；
@@ -143,11 +168,15 @@ private:
     ControlOutput last_out_{};
     uint64_t cycle_count_ = 0;
     int64_t  run_start_ns_ = 0;
+    int64_t  session_moving_ns_ = 0;   ///< 本次运行的转动时长（RT 私有）
     double   jitter_sum_ = 0;
     RtStats  stats_{};
     AppState app_state_ = AppState::Disconnected;
     bool     mode_matched_ = false;
     double   hold_position_deg_ = 0;
+    // CSP 空闲保持锁存（见 config.hpp cspIdleHoldTarget 注释）：
+    // 未运行时目标不许跟随实测位置，否则位置环零刚度、重力拖着关节蠕动。
+    CspIdleHold csp_idle_hold_{};
     uint64_t disable_wait_cycles_ = 0;
     // 软停超时告警只锁存一次：等待期内每拍都满足超时条件，不能每拍都重跑
     // %f snprintf 覆盖 last_error（1kHz 热路径 + GUI 侧看到的错误信息一直在

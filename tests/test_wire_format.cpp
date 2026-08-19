@@ -14,18 +14,31 @@ TEST(sample_has_no_internal_padding) {
 
 // 终审 finding M2：只做"能整除"的弱校验挡不住字段被插队/换位——只要新位置
 // 仍然是 4 的倍数就能悄悄溜过上面那条测试。这里钉死三个分组边界的绝对偏移
-// （8 字节量 14 个 = 8+14*8=120，随后 8 个 int32/uint32 各组 = 120+8*4+4*4=168，
-// 随后 4 个 u16/i16 = 168+4*2=176，再 2 个 i16 = 176+2*2=180），
+// （8 字节量 16 个 = 8+16*8=136，随后 8 个 int32/uint32 各组 = 136+8*4+4*4=184，
+// 随后 4 个 u16/i16 = 184+4*2=192，再 2 个 i16 = 192+2*2=196），
 // 由编译器实测（g++ 13, x86_64，自然对齐无 pragma pack）确认，如目标平台不同
 // 需以实测值为准。
 TEST(sample_field_offsets_pinned) {
-    CHECK_EQ((int)offsetof(Sample, controlword), 168);
-    CHECK_EQ((int)offsetof(Sample, torque_actual_permille), 176);
-    CHECK_EQ((int)offsetof(Sample, operation_mode), 180);
+    CHECK_EQ((int)offsetof(Sample, controlword), 184);
+    CHECK_EQ((int)offsetof(Sample, torque_actual_permille), 192);
+    CHECK_EQ((int)offsetof(Sample, operation_mode), 196);
 }
 
 TEST(protocol_version_bumped_for_new_layout) {
-    CHECK_EQ((int)kProtocolVersion, 2);
+    CHECK_EQ((int)kProtocolVersion, 3);
+}
+
+// v3 新增的两个派生力矩量（double，排在 velocity_error_rpm 之后、int32 组之前）。
+// motor_torque_Nm = actual_torque_Nm / gear_ratio（电机轴侧）；
+// torque_est_Nm = 0x3B69 / 1000（厂商传递力矩估计，mNm→Nm，
+// 单位已用 0x3B6A ≈ 0x3B69/额定31Nm 真机数据交叉验证）。
+TEST(derived_torque_fields_present_v3) {
+    Sample s{};
+    s.motor_torque_Nm = 0.0625;
+    s.torque_est_Nm   = 8.2;
+    CHECK_EQ((int)offsetof(Sample, motor_torque_Nm), 120);
+    CHECK_EQ((int)offsetof(Sample, torque_est_Nm), 128);
+    CHECK(s.motor_torque_Nm + s.torque_est_Nm > 8.26);
 }
 
 // 新字段必须在场

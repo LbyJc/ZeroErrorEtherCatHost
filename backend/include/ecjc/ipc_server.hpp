@@ -46,6 +46,11 @@ public:
         do_reconnect_ = std::move(reconnect);
     }
     void setResetEncoderAction(BusAction a) { do_reset_encoder_ = std::move(a); }
+    /// 由 main 注入：GUI 清零累计转动时长后立即落盘（不等 30s 周期写盘，
+    /// 免得清零后马上断电又"复活"旧值）。
+    void setPersistMovingTimeAction(std::function<void()> a) {
+        persist_moving_time_ = std::move(a);
+    }
 
     bool hasClient() const;
 
@@ -144,6 +149,7 @@ private:
     std::unordered_map<int, uint32_t> per_client_drops_;
 
     BusAction do_connect_, do_disconnect_, do_reconnect_, do_reset_encoder_;
+    std::function<void()> persist_moving_time_;
     std::vector<Sample> tele_buf_;
 };
 
